@@ -429,6 +429,12 @@ async function handleMessage(msg, sender) {
       return await publish.markInvalid();
     }
 
+    case 'pub:markPublished': {
+      // 助手页「标注为已发过」：往 published 表补一条记录（主键 [url, 当前任务目标地址]）；
+      // domain = 面板「定位同行网站」输入框的同行域名（空则回落会话 refDomain）
+      return await publish.markAsPublished(msg.domain);
+    }
+
     case 'pub:addResource': {
       // 助手页「将当前资源添加到资源库」：当前标签页补录进 analysis 表（ready）；
       // domain = 面板「定位同行网站」输入框的同行域名（随消息带上，必填）

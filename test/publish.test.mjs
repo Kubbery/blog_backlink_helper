@@ -3,7 +3,9 @@
  * 口径：markPublished 写 published 表（含 targetDomain 同行域名）；ensureAnalysisResource
  * 把不在资源库（analysis 表）的页面补录为 ready 资源（按同行域名归档），同 url 已有记录
  * （任意同行域名）或缺少同行域名时跳过；addCurrentResource（「将当前资源添加到资源库」按钮）
- * 同口径补录当前激活标签页，同行域名必填（取「定位同行网站」输入框），已在资源库则拒绝。
+ * 同口径补录当前激活标签页，同行域名必填（取「定位同行网站」输入框），已在资源库则拒绝；
+ * markAsPublished（「标注为已发过」按钮）直接往 published 表补记录，目标地址取当前任务
+ * （缺省回落设置里的身份网址），同主键已有记录或目标地址为空时拒绝。
  * 打内存版 IndexedDB / chrome.storage / chrome.tabs 最小桩。
  */
 import { test, before } from 'node:test';
@@ -29,11 +31,12 @@ globalThis.chrome = {
   },
 };
 
-let PublishAssistant, idbGet, idbGetAll, idbPutAll;
+let PublishAssistant, idbGet, idbGetAll, idbPutAll, getState;
 
 before(async () => {
   ({ PublishAssistant } = await import('../extension/background/publish.js'));
   ({ idbGet, idbGetAll, idbPutAll } = await import('../extension/lib/idb.js'));
+  ({ getState } = await import('../extension/lib/storage.js'));
 });
 
 const assistant = () => new PublishAssistant(async () => {});
@@ -106,4 +109,38 @@ test('addCurrentResource：同 url 已有记录（任意同行域名）→ 拒�
   const rows = (await idbGetAll('analysis')).filter((r) => r.url === 'https://dup-add.com/p');
   assert.equal(rows.length, 1);
   assert.equal(rows[0].targetDomain, 'old-peer.com'); // 原记录不动
+});
+
+test('markAsPublished：当前标签页 + 当前任务目标地址 → 写入 published 记录（含同行域名）', async () => {
+  const a = assistant();
+  activeTabUrl = 'https://marked.com/post';
+  getState().assistantTask = { name: '任务B', targetUrl: 'https://me-b.com', siteIntro: '', mainKeyword: '' };
+  const res = await a.markAsPublished(' peer-b.com ');
+  assert.equal(res.ok, true);
+  const row = await idbGet('published', ['https://marked.com/post', 'https://me-b.com']);
+  assert.ok(row);
+  assert.equal(row.targetDomain, 'peer-b.com');
+  assert.equal(row.taskName, '任务B');
+  assert.ok(row.publishedAt);
+});
+
+test('markAsPublished：同主键已有记录 → 拒绝覆盖', async () => {
+  const a = assistant();
+  activeTabUrl = 'https://marked.com/post'; // 上一个用例已落库
+  getState().assistantTask = { name: '任务B', targetUrl: 'https://me-b.com', siteIntro: '', mainKeyword: '' };
+  const res = await a.markAsPublished('other-peer.com');
+  assert.equal(res.ok, false);
+  const row = await idbGet('published', ['https://marked.com/post', 'https://me-b.com']);
+  assert.equal(row.targetDomain, 'peer-b.com'); // 原记录不动
+});
+
+test('markAsPublished：目标地址为空（任务与身份网址都缺）→ 拒绝', async () => {
+  const a = assistant();
+  activeTabUrl = 'https://no-target.com/p';
+  getState().assistantTask = { name: '', targetUrl: '', siteIntro: '', mainKeyword: '' };
+  getState().settings.identity.website = '';
+  const res = await a.markAsPublished('peer.com');
+  assert.equal(res.ok, false);
+  const rows = (await idbGetAll('published')).filter((r) => r.url === 'https://no-target.com/p');
+  assert.equal(rows.length, 0);
 });

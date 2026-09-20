@@ -11,7 +11,8 @@
  *   还会补录进 analysis 表当资源（ready，按同行域名归档），并把这次发布记进
  *   chrome.storage.local 的 lastPublish（url/目标地址/任务名/时间）；助手页底部「备注」
  *   随时给上次发布打标记（如「有审核」「失败」），不要求当前标签页还停在该资源页；
- *   Skip 仅清理页面标记；「标记为无效资源」停用 analysis 记录。
+ *   Skip 仅清理页面标记；「标记为无效资源」停用 analysis 记录；
+ *   「标注为已发过」不经提交流程，直接往 published 表补一条记录（已有同主键记录则拒绝）。
  *   「换一个」：把当前激活标签页导航到资源库中未发布过的下一条资源（ready 优先于 captcha）。
  *   助手页所需数据（状态文案/摘要/评论/译文/昵称/邮箱）全部落在 publishRuntime
  *   （rt.uiStatus / rt.manual），经快照广播给面板渲染；页面脚本只做无 UI 操作。
@@ -458,6 +459,42 @@ export class PublishAssistant {
       return { ok: true };
     } catch (e) {
       addLog('publish', `标记无效资源失败：${e.message}`, 'error', url);
+      return { ok: false, error: e.message };
+    }
+  }
+
+  /**
+   * 助手页「标注为已发过」：不经提交流程，直接往 published 表补一条记录（主键 [url, targetUrl]），
+   * 用于人工确认「这个页面以前发过了」的防重复。目标地址取「当前任务」（缺省回落设置里的身份网址），
+   * 同行域名 = 面板「定位同行网站」输入框的值，空则回落会话 refDomain；已有同主键记录则拒绝覆盖。
+   */
+  async markAsPublished(domain) {
+    const tab = await this.activeTab();
+    if (!tab) {
+      return { ok: false, error: '当前没有可操作的网页标签页' };
+    }
+    const url = tab.url;
+    const cfg = this.taskConfig();
+    if (!cfg.targetUrl) {
+      return { ok: false, error: '当前任务未配置目标地址（且设置里的身份网址为空），无法归档发布记录' };
+    }
+    try {
+      if (await idbGet('published', [url, cfg.targetUrl]).catch(() => null)) {
+        return { ok: false, error: '该页面与当前目标地址已有发布记录' };
+      }
+      const rt = getState().publishRuntime;
+      const refDomain = (domain || '').trim() || (rt && rt.refDomain) || '';
+      await this.markPublished(url, cfg.targetUrl, cfg.name, refDomain);
+      addLog('publish', '已标注为已发过（记入 published 表）', 'info', url);
+      if (rt && rt.resourceUrl === url) {
+        rt.uiStatus = { key: 'asstPublishedMarked' };
+        await this.notify(['publishRuntime', 'logs']);
+      } else {
+        await this.notify(['logs']);
+      }
+      return { ok: true };
+    } catch (e) {
+      addLog('publish', `标注为已发过失败：${e.message}`, 'error', url);
       return { ok: false, error: e.message };
     }
   }

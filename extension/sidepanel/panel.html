@@ -133,6 +133,8 @@
         </div>
         <!-- 标记无效资源：改 analysis 记录 enabled=false（不删数据） -->
         <button id="asst-disable" class="btn btn-outline btn-block" style="margin-top:6px" data-i18n="asstMarkInvalid">标记为无效资源</button>
+        <!-- 标注为已发过：往 published 表补一条记录（防重复判定用，不经提交流程） -->
+        <button id="asst-mark-published" class="btn btn-outline btn-block" style="margin-top:6px" data-i18n="asstMarkPublished" data-i18n-title="asstMarkPublishedHint">标注为已发过</button>
         <!-- 上次发布备注：给最近一次 Submit 成功的发布打标记（如「有审核」「失败」），与当前标签页无关 -->
         <div class="form-row" id="asst-note-row" style="margin-top:6px">
           <label class="field-label" data-i18n="asstNoteLabel">上次发布备注</label>

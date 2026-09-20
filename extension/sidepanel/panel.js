@@ -363,6 +363,8 @@ function renderAssistant() {
   $('#asst-skip').disabled = !review;
   // 「标记为无效资源」：激活标签页是可注入网页即可用（按当前页面 URL 停用 analysis 记录，不要求绑定会话）
   $('#asst-disable').disabled = !activeTabUrl;
+  // 「标注为已发过」：同口径（按当前页面 URL 往 published 表补记录，不要求绑定会话）
+  $('#asst-mark-published').disabled = !activeTabUrl;
   // 「将当前资源添加到资源库」：同样只要求激活标签页是可注入网页（同行域名取「定位同行网站」输入框）
   $('#asst-add-resource').disabled = !activeTabUrl;
   // 「备注」输入行：标记上一次 Submit 成功的发布（lastPublish），与当前标签页是否绑定无关；
@@ -490,6 +492,19 @@ async function markInvalid() {
   btn.disabled = false;
 }
 
+/** 「标注为已发过」：往 published 表补一条记录（同行域名随消息带给后台，取「定位同行网站」输入框） */
+async function markAsPublished() {
+  const btn = $('#asst-mark-published');
+  btn.disabled = true;
+  try {
+    const res = await send({ type: 'pub:markPublished', domain: $('#asst-locate-domain').value.trim() });
+    if (res && res.ok === false) toast(res.error || t('asstStepNoResp'), 'error');
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+  btn.disabled = false;
+}
+
 /** 「将当前资源添加到资源库」：同行网站取「定位同行网站」右侧输入框的值，后台补录 analysis 表（ready） */
 async function addResource() {
   const btn = $('#asst-add-resource');
@@ -598,6 +613,7 @@ function bindEvents() {
   $('#asst-submit').addEventListener('click', () => decide('submit'));
   $('#asst-skip').addEventListener('click', () => decide('skip'));
   $('#asst-disable').addEventListener('click', markInvalid);
+  $('#asst-mark-published').addEventListener('click', markAsPublished);
   $('#asst-add-resource').addEventListener('click', addResource);
   $('#asst-note-save').addEventListener('click', saveNote);
 
