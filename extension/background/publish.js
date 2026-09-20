@@ -419,26 +419,31 @@ export class PublishAssistant {
     return { ok: true, submitted };
   }
 
-  /** 助手页「标记为无效资源」：把 analysis 表中该 url 的记录全部停用（enabled=false，数据保留） */
+  /** 助手页「标记为无效资源」：把 analysis 表中当前激活标签页 url 的记录全部停用（enabled=false，数据保留）。不要求绑定会话，只认当前页面 */
   async markInvalid() {
     const tab = await this.activeTab();
-    const rt = getState().publishRuntime;
-    if (!tab || !rt || rt.resourceUrl !== tab.url) {
-      return { ok: false, error: '请在绑定的资源页面上操作（当前标签页与会话不一致）' };
+    if (!tab) {
+      return { ok: false, error: '当前没有可操作的网页标签页' };
     }
+    const url = tab.url;
     try {
       const rows = await idbGetAll('analysis');
       const dirty = rows
-        .filter((r) => r && r.url === rt.resourceUrl && r.enabled !== false)
+        .filter((r) => r && r.url === url && r.enabled !== false)
         .map((r) => ({ ...r, enabled: false }));
       if (!dirty.length) return { ok: false, error: 'analysis 表中没有该页面的资源记录（或已停用）' };
       await idbPutAll('analysis', dirty);
-      addLog('publish', `已标记为无效资源（enabled=false，共 ${dirty.length} 条）`, 'info', rt.resourceUrl);
-      rt.uiStatus = { key: 'asstInvalidMarked' };
-      await this.notify(['publishRuntime', 'logs']);
+      addLog('publish', `已标记为无效资源（enabled=false，共 ${dirty.length} 条）`, 'info', url);
+      const rt = getState().publishRuntime;
+      if (rt && rt.resourceUrl === url) {
+        rt.uiStatus = { key: 'asstInvalidMarked' };
+        await this.notify(['publishRuntime', 'logs']);
+      } else {
+        await this.notify(['logs']);
+      }
       return { ok: true };
     } catch (e) {
-      addLog('publish', `标记无效资源失败：${e.message}`, 'error', rt.resourceUrl);
+      addLog('publish', `标记无效资源失败：${e.message}`, 'error', url);
       return { ok: false, error: e.message };
     }
   }
@@ -466,8 +471,8 @@ export class PublishAssistant {
 
   /**
    * 助手页「换一个」：把当前激活标签页导航到资源库中未发布过的下一条资源。
-   * 口径与资源库一致：analysis 表命中结论（ready/captcha）且启用，published 表无记录；
-   * ready 优先于 captcha，同档按命中时间新→旧。
+   * 口径与资源库一致：analysis 表命中结论（ready/captcha）且启用，且 published 表中
+   * 对当前任务目标地址无记录；ready 优先于 captcha，同档按命中时间新→旧。
    */
   /** 资源库「立即发布」：当前激活标签页导航到指定资源，并记下该资源来自的同行域名（供 bind 使用） */
   async navigateTo(url, refDomain) {
@@ -487,7 +492,8 @@ export class PublishAssistant {
       idbGetAll('analysis').catch(() => []),
       idbGetAll('published').catch(() => []),
     ]);
-    const pubUrls = new Set(published.map((r) => r && r.url));
+    const target = this.taskConfig().targetUrl;
+    const pubUrls = new Set(published.filter((r) => r && r.targetUrl === target).map((r) => r.url));
     const seen = new Set();
     const candidates = analysis
       .filter((r) => r && r.url && (r.status === 'ready' || r.status === 'captcha')

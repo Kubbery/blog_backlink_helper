@@ -29,15 +29,26 @@ function ensureControllers() {
   if (!publish) publish = new PublishAssistant(notify);
 }
 
+/** 当前「当前任务」的目标地址（与发布口径一致：缺省回落到设置里的身份网址） */
+function taskTargetUrl(st = getState()) {
+  return (st.assistantTask && st.assistantTask.targetUrl) || st.settings.identity.website || '';
+}
+
+/** 「已发布」按当前任务判定：published 表中存在 [url, 当前任务目标地址] 记录才算已发布 */
+function publishedUrlSet(published, st) {
+  const target = taskTargetUrl(st);
+  return new Set(published.filter((r) => r && r.targetUrl === target).map((r) => r.url));
+}
+
 async function snapshot() {
   const st = getState();
   // 可用资源 = analysis 表命中结论的记录（不经内存态）；同一 url 可能被多个目标域名收集到，按 url 去重合并：
-  // 任一记录停用即停用，任一目标网址发布过即标 published
+  // 任一记录停用即停用，对当前任务目标地址发布过即标 published
   const [analysis, published] = await Promise.all([
     idbGetAll('analysis').catch(() => []),
     idbGetAll('published').catch(() => []),
   ]);
-  const publishedUrls = new Set(published.map((r) => r && r.url));
+  const publishedUrls = publishedUrlSet(published, st);
   const hits = analysis
     .filter((r) => r && r.url && VALID_STATUSES.includes(r.status))
     .sort((a, b) => (b.checkedAt || 0) - (a.checkedAt || 0)); // 新命中的在前
@@ -242,7 +253,7 @@ async function handleMessage(msg, sender) {
         idbGetAll('analysis').catch(() => []),
         idbGetAll('published').catch(() => []),
       ]);
-      const publishedUrls = new Set(published.map((r) => r && r.url));
+      const publishedUrls = publishedUrlSet(published);
       const resources = rows
         .filter((r) => r && r.url && VALID_STATUSES.includes(r.status))
         .sort((a, b) => (b.checkedAt || 0) - (a.checkedAt || 0)) // 新命中的在前
@@ -253,7 +264,7 @@ async function handleMessage(msg, sender) {
           type: 'blog_comment',
           status: r.status,
           enabled: r.enabled !== false, // 旧数据无该字段，默认启用
-          published: publishedUrls.has(r.url), // published 表有记录（任一目标网址）即视为已发布
+          published: publishedUrls.has(r.url), // 对当前任务目标地址发布过才算已发布
           checkedAt: r.checkedAt,
         }));
       return { ok: true, resources };

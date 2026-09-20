@@ -114,11 +114,15 @@ test('getSnapshot：resources 由 analysis 命中记录派生（不经内存态�
   assert.equal('resources' in getState(), false); // 内存态不存资源
 });
 
-test('getSnapshot：published 表有记录的 url 标记为已发布', async () => {
-  await idbPutAll('published', [{ url: 'https://a.com/1', targetUrl: 'https://me.com', taskId: 't1', publishedAt: 10 }]);
+test('getSnapshot：published 标记按当前任务目标地址判定', async () => {
+  await idbPutAll('published', [
+    { url: 'https://a.com/1', targetUrl: 'https://me.com', taskName: 't1', publishedAt: 10 },
+    { url: 'https://a.com/2', targetUrl: 'https://other.com', taskName: 't2', publishedAt: 10 },
+  ]);
+  getState().assistantTask.targetUrl = 'https://me.com';
   const res = await sendMsg({ type: 'getSnapshot' });
-  assert.equal(res.snapshot.resources.find((r) => r.url === 'https://a.com/1').published, true);
-  assert.equal(res.snapshot.resources.find((r) => r.url === 'https://a.com/2').published, false);
+  assert.equal(res.snapshot.resources.find((r) => r.url === 'https://a.com/1').published, true);  // 当前任务目标发布过
+  assert.equal(res.snapshot.resources.find((r) => r.url === 'https://a.com/2').published, false); // 只给别的目标发布过
 });
 
 test('getLibraryResources：取 analysis 表中命中结论（ready/captcha）的记录', async () => {
@@ -131,7 +135,8 @@ test('getLibraryResources：取 analysis 表中命中结论（ready/captcha）�
   assert.equal(row.type, 'blog_comment');
   assert.equal(row.status, 'ready');
   assert.equal(row.enabled, true); // 旧数据无 enabled 字段，默认启用
-  assert.equal(row.published, true); // 上个用例已把 a.com/1 写入 published 表
+  assert.equal(row.published, true); // 上个用例已把 a.com/1 按当前任务目标 me.com 写入 published 表
+  assert.equal(res.resources[1].published, false); // a.com/2 只给别的目标发布过，对当前任务算未发布
 });
 
 test('setLibraryEnabled：停用只改标记不删数据，快照资源同步停用', async () => {
