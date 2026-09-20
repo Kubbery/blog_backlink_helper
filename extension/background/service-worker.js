@@ -404,13 +404,20 @@ async function handleMessage(msg, sender) {
     }
 
     case 'pub:decision': {
-      // 助手页 Submit / Skip：操作对象 = 当前激活标签页（须与 publishRuntime 绑定页面一致）
-      return await publish.onDecision(msg.decision);
+      // 助手页 Submit / Skip：操作对象 = 当前激活标签页（须与 publishRuntime 绑定页面一致）；
+      // domain = 面板「定位同行网站」输入框的同行域名，Submit 成功时随 published 记录落库
+      return await publish.onDecision(msg.decision, msg.domain);
     }
 
     case 'pub:markInvalid': {
       // 助手页「标记为无效资源」：analysis 表该 url 的记录 enabled=false（数据保留）
       return await publish.markInvalid();
+    }
+
+    case 'pub:addResource': {
+      // 助手页「将当前资源添加到资源库」：当前标签页补录进 analysis 表（ready）；
+      // domain = 面板「定位同行网站」输入框的同行域名（随消息带上，必填）
+      return await publish.addCurrentResource(msg.domain);
     }
 
     case 'pub:note': {
@@ -421,11 +428,6 @@ async function handleMessage(msg, sender) {
     case 'pub:step': {
       // 助手页的步骤按钮：获取标题与摘要 / 识别表单 / 生成评论 / 填写表单（对当前激活标签页）
       return await publish.onStep(msg.step);
-    }
-
-    case 'pub:locate': {
-      // 助手页「定位同行网站」：结果（第 n/m 个或失败原因）随响应返回给面板展示
-      return await publish.onLocate(msg.domain);
     }
 
     case 'pub:navigate': {

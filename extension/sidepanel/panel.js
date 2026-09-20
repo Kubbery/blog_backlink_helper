@@ -4,10 +4,13 @@
  * 步骤按钮、字段展示与复制、定位同行网站、Submit/Skip、「换一个」——全部作用于浏览器
  * 当前激活的标签页；AI 步骤的运行结果来自 snapshot.publish（后台 publishRuntime 的投影），
  * 面板按 publish.resourceUrl 与当前激活标签页 URL 是否一致决定字段区与 Submit/Skip 是否生效。
- * 与 background 通过 sendMessage(RPC) + stateChanged 广播推送交互。
+ * 与 background 通过 sendMessage(RPC) + stateChanged 广播推送交互；「定位同行网站」例外——
+ * 它是只读视觉辅助，由面板直接注入当前标签页主框架执行（不经后台，避免 SW 回收丢响应卡死按钮）。
  */
 import { setLanguage, t, applyI18n } from '../lib/i18n.js';
 import { toCSV, fmtTime, samePageUrl } from '../lib/util.js';
+import { idbGetAll } from '../lib/idb.js';
+import { LIMITS } from '../lib/config.js';
 
 let snap = null;
 
@@ -359,6 +362,8 @@ function renderAssistant() {
   $('#asst-skip').disabled = !review;
   // 「标记为无效资源」：激活标签页是可注入网页即可用（按当前页面 URL 停用 analysis 记录，不要求绑定会话）
   $('#asst-disable').disabled = !activeTabUrl;
+  // 「将当前资源添加到资源库」：同样只要求激活标签页是可注入网页（同行域名取「定位同行网站」输入框）
+  $('#asst-add-resource').disabled = !activeTabUrl;
   // 「备注」输入行：标记上一次 Submit 成功的发布（lastPublish），与当前标签页是否绑定无关；
   // 换了一条发布记录时把输入框重置为该记录已存的备注（无则给默认文案），同一条内保留用户输入
   const lp = snap.lastPublish || null;
@@ -405,30 +410,64 @@ async function runStep(step) {
   if (failed) $('#asst-status').textContent = t('asstStepNoResp');
 }
 
-/** 「定位同行网站」：结果（第 n/m 个 / 未找到）显示在状态行；域名取右侧输入框（可手改，空则后台回落会话 refDomain） */
+/** 给 Promise 加超时：超时后以带 timeoutFlag 标记的错误 reject（面板直连注入的兜底，防止按钮卡死） */
+function withTimeout(p, ms) {
+  return Promise.race([
+    p,
+    new Promise((_, rej) => setTimeout(() => { const e = new Error('timeout'); e.timeoutFlag = true; rej(e); }, ms)),
+  ]);
+}
+
+/** 向标签页主框架注入 publisher（页面内幂等守卫防重复）并调 locateLink 循环标记指向该域名的锚点 */
+async function locateInTab(tabId, domain) {
+  await chrome.scripting.executeScript({ target: { tabId, frameIds: [0] }, files: ['content/publisher.js'] });
+  const [r] = await chrome.scripting.executeScript({
+    target: { tabId, frameIds: [0] },
+    func: (d) => window.__BCM_PUB__ && window.__BCM_PUB__.locateLink({ domain: d }),
+    args: [domain],
+  });
+  return r && r.result;
+}
+
+/** 「定位同行网站」：面板直连注入主框架执行（不经后台）。域名取右侧输入框（可手改），
+ *  空则按当前标签页 URL 查 analysis 表取同行域名（与后台 bind 的兜底口径一致）并顺手回填输入框。 */
 async function runLocate() {
   const btn = $('#asst-locate');
+  const status = $('#asst-status');
   btn.disabled = true;
   const old = btn.textContent;
   btn.textContent = t('asstLocating');
   try {
-    const res = await send({ type: 'pub:locate', domain: $('#asst-locate-domain').value.trim() });
-    const status = $('#asst-status');
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab || !/^https?:/.test(tab.url || '')) { status.textContent = t('asstNoPage'); return; }
+    let domain = $('#asst-locate-domain').value.trim();
+    if (!domain) {
+      try {
+        const rows = await idbGetAll('analysis');
+        const hit = rows.find((r) => r && samePageUrl(r.url, tab.url));
+        domain = (hit && hit.targetDomain) || '';
+        if (domain) $('#asst-locate-domain').value = domain;
+      } catch { /* 查不到则按未找到目标域名提示 */ }
+    }
+    if (!domain) { status.textContent = t('asstNoTarget'); return; }
+    // 带超时：目标页渲染进程假死时 executeScript 可能永不返回，不能让按钮卡死在「正在定位」
+    const res = await withTimeout(locateInTab(tab.id, domain), LIMITS.locateTimeoutMs);
     if (res && res.ok && res.index != null) status.textContent = t('asstLocated', { n: res.index, m: res.total });
-    else if (res && res.reason === 'noTarget') status.textContent = t('asstNoTarget');
-    else if (res && res.reason === 'noPage') status.textContent = t('asstNoPage');
     else status.textContent = t('asstNoLink');
   } catch (e) {
-    toast(e.message, 'error');
+    if (e && e.timeoutFlag) status.textContent = t('asstLocateTimeout');
+    else toast(e.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = old;
   }
-  btn.disabled = false;
-  btn.textContent = old;
 }
 
 async function decide(decision) {
   await refreshActiveTab(); // 先对齐激活标签页 URL，避免面板持有过期绑定状态
   try {
-    const res = await send({ type: 'pub:decision', decision });
+    // 同行域名随消息带给后台：Submit 成功时写进 published 记录（取「定位同行网站」输入框，可手改）
+    const res = await send({ type: 'pub:decision', decision, domain: $('#asst-locate-domain').value.trim() });
     // 后台返回的具体原因优先展示（守卫拒绝会带 error），无原因才退回笼统提示
     if (res && res.ok === false) toast(res.error || t('asstStepNoResp'), 'error');
     // Submit 成功后备注输入框由快照里的新 lastPublish 驱动重置（renderAssistant 处理）
@@ -443,6 +482,19 @@ async function markInvalid() {
   btn.disabled = true;
   try {
     const res = await send({ type: 'pub:markInvalid' });
+    if (res && res.ok === false) toast(res.error || t('asstStepNoResp'), 'error');
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+  btn.disabled = false;
+}
+
+/** 「将当前资源添加到资源库」：同行网站取「定位同行网站」右侧输入框的值，后台补录 analysis 表（ready） */
+async function addResource() {
+  const btn = $('#asst-add-resource');
+  btn.disabled = true;
+  try {
+    const res = await send({ type: 'pub:addResource', domain: $('#asst-locate-domain').value.trim() });
     if (res && res.ok === false) toast(res.error || t('asstStepNoResp'), 'error');
   } catch (e) {
     toast(e.message, 'error');
@@ -545,6 +597,7 @@ function bindEvents() {
   $('#asst-submit').addEventListener('click', () => decide('submit'));
   $('#asst-skip').addEventListener('click', () => decide('skip'));
   $('#asst-disable').addEventListener('click', markInvalid);
+  $('#asst-add-resource').addEventListener('click', addResource);
   $('#asst-note-save').addEventListener('click', saveNote);
 
   // 助手页「当前任务」：折叠/展开任务详情

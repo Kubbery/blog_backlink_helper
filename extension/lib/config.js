@@ -37,6 +37,7 @@ export const LIMITS = {
   articleTextChunk: 3000,// 送 AI 的正文截断长度
   discoverHtmlChunk: 20000,
   pageSettleMs: 1200,    // 注入前等待页面渲染时间
+  locateTimeoutMs: 8000, // 「定位同行网站」面板直连注入超时：渲染进程假死时 executeScript 可能永不返回
   aiReasoningEffort: 'low', // 思考模型（如 GLM）的推理强度：压低避免思考 token 吃光 max_tokens 导致 content 为空
 };
 

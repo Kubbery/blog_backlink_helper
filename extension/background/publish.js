@@ -6,7 +6,9 @@
  *   步骤：获取标题与摘要 / AI 识别表单 / AI 生成评论 互不依赖、可任意顺序、可反复触发
  *   （同一步骤的并发触发由 stepBusy 去重）；「自动填写表单」需评论已生成，
  *   填表成功后进入 awaiting_review 等人工 Submit / Skip（此阶段步骤仍可重跑并覆盖重填）。
- *   Submit 成功写 published 表（按 [url, targetUrl] 防重复），并把这次发布记进
+ *   Submit 成功写 published 表（按 [url, targetUrl] 防重复；不要求页面在资源库中，
+ *   同行域名取面板「定位同行网站」输入框的值，空则回落会话 refDomain）；页面不在资源库时
+ *   还会补录进 analysis 表当资源（ready，按同行域名归档），并把这次发布记进
  *   chrome.storage.local 的 lastPublish（url/目标地址/任务名/时间）；助手页底部「备注」
  *   随时给上次发布打标记（如「有审核」「失败」），不要求当前标签页还停在该资源页；
  *   Skip 仅清理页面标记；「标记为无效资源」停用 analysis 记录。
@@ -130,10 +132,14 @@ export class PublishAssistant {
     return rt;
   }
 
-  /** 发布成功：记入 published 表（已发过的外链，按 [url, targetUrl] 去重） */
-  async markPublished(url, targetUrl, taskName) {
+  /**
+   * 发布成功：记入 published 表（已发过的外链，按 [url, targetUrl] 去重）。
+   * 不要求 url 在资源库（analysis 表）中——手动打开的资源页同样落库；
+   * targetDomain = 同行网站域名（面板「定位同行网站」输入框的值，空则回落会话 refDomain）。
+   */
+  async markPublished(url, targetUrl, taskName, targetDomain) {
     try {
-      await idbPut('published', { url, targetUrl, taskName: taskName || '', publishedAt: fmtDateTime() });
+      await idbPut('published', { url, targetUrl, targetDomain: targetDomain || '', taskName: taskName || '', publishedAt: fmtDateTime() });
     } catch (e) {
       addLog('publish', `published 表写入失败：${e.message}`, 'warn', url);
     }
@@ -146,6 +152,26 @@ export class PublishAssistant {
       const hit = rows.find((r) => r && r.url === url && r.status === 'ready');
       if (hit) await idbPut('analysis', { ...hit, status: 'captcha', reason: '发布时检测到验证码', checkedAt: Date.now() });
     } catch { /* 标记失败不影响主流程 */ }
+  }
+
+  /**
+   * Submit 成功后把页面补录进资源库（analysis 表，结论 ready）：手动打开的资源页
+   * 不在资源库里，发布成功即证明它是可用资源，按同行域名归档后资源库/「换一个」都能用上。
+   * 同 url 已有记录（任意同行域名）则跳过；没有同行域名无法归档（主键 [targetDomain, url]），跳过并记日志。
+   */
+  async ensureAnalysisResource(url, targetDomain) {
+    try {
+      const rows = await idbGetAll('analysis');
+      if (rows.some((r) => r && r.url === url)) return;
+      if (!targetDomain) {
+        addLog('publish', '页面不在资源库且未填写同行域名（「定位同行网站」右侧输入框），未补录进资源库', 'info', url);
+        return;
+      }
+      await idbPut('analysis', { targetDomain, url, status: 'ready', reason: '发布成功补录（手动打开的资源页）', checkedAt: Date.now() });
+      addLog('publish', `已把页面补录进资源库（同行：${targetDomain}）`, 'info', url);
+    } catch (e) {
+      addLog('publish', `资源库补录失败：${e.message}`, 'warn', url);
+    }
   }
 
   /** 注入 publisher.js 到页面的所有框架（评论框可能在 iframe 里，如 Disqus）；个别框架不可注入时退回主框架 */
@@ -334,26 +360,11 @@ export class PublishAssistant {
   }
 
   /**
-   * 助手页「定位同行网站」：在当前标签页主框架循环标记指向收集目标域名的锚点。
-   * 结果（{ ok, index, total } 或 { ok:false, reason }）随消息响应返回给面板展示。
+   * 助手页 Submit / Skip 回调：仅 awaiting_review（表单已填好待确认）可执行。
+   * domain = 面板「定位同行网站」输入框的同行域名（Submit 成功时写进 published 记录；
+   * 当前页面不在资源库中时也照常落库，同行域名即取此输入框，空则回落会话 refDomain）。
    */
-  async onLocate(domain) {
-    const tab = await this.activeTab();
-    if (!tab) return { ok: false, reason: 'noPage' };
-    const rt = await this.bind(tab);
-    // 域名优先取面板输入框的值（用户可手改），空则回落绑定会话的 refDomain
-    const target = (domain || '').trim() || rt.refDomain;
-    if (!target) return { ok: false, reason: 'noTarget' };
-    try {
-      const res = await this.frameCall(tab.id, 0, 'locateLink', { domain: target });
-      return res || { ok: false, reason: 'noLink' };
-    } catch {
-      return { ok: false, reason: 'noLink' }; // 页面可能已跳转/关闭
-    }
-  }
-
-  /** 助手页 Submit / Skip 回调：仅 awaiting_review（表单已填好待确认）可执行 */
-  async onDecision(decision) {
+  async onDecision(decision, domain) {
     const tab = await this.activeTab();
     const rt = getState().publishRuntime;
     // 守卫拒绝必须给出具体原因并记日志：此前静默 {ok:false}，面板只能显示笼统的「超时/无响应」
@@ -377,7 +388,10 @@ export class PublishAssistant {
         const s = await this.frameCall(tab.id, (rt.manual && rt.manual.frameId) || 0, 'submit');
         if (s && s.ok) {
           submitted = true;
-          await this.markPublished(rt.resourceUrl, cfg.targetUrl, cfg.name);
+          const refDomain = (domain || '').trim() || rt.refDomain || '';
+          await this.markPublished(rt.resourceUrl, cfg.targetUrl, cfg.name, refDomain);
+          // 页面不在资源库（手动打开的资源页）时补录为 ready 资源，之后资源库/「换一个」都能用上
+          await this.ensureAnalysisResource(rt.resourceUrl, refDomain);
           // 记下「上次发布」：助手页备注按钮的标记对象（与当前标签页解耦，之后随时可改备注）
           getState().lastPublish = {
             url: rt.resourceUrl,
@@ -444,6 +458,42 @@ export class PublishAssistant {
       return { ok: true };
     } catch (e) {
       addLog('publish', `标记无效资源失败：${e.message}`, 'error', url);
+      return { ok: false, error: e.message };
+    }
+  }
+
+  /**
+   * 助手页「将当前资源添加到资源库」：手动把当前激活标签页补录进 analysis 表（结论 ready），
+   * 与 Submit 成功后的补录同口径。同行网站域名 = 面板「定位同行网站」右侧输入框的值（必填，
+   * 主键 [targetDomain, url] 无法缺省归档）；同 url 已有记录（任意同行域名）视为已在资源库，不重复添加。
+   */
+  async addCurrentResource(domain) {
+    const tab = await this.activeTab();
+    if (!tab) {
+      return { ok: false, error: '当前没有可操作的网页标签页' };
+    }
+    const url = tab.url;
+    const targetDomain = (domain || '').trim();
+    if (!targetDomain) {
+      return { ok: false, error: '请先在「定位同行网站」右侧输入框填写同行网站域名' };
+    }
+    try {
+      const rows = await idbGetAll('analysis');
+      if (rows.some((r) => r && r.url === url)) {
+        return { ok: false, error: '该页面已在资源库中' };
+      }
+      await idbPut('analysis', { targetDomain, url, status: 'ready', reason: '手动添加（助手页按钮）', checkedAt: Date.now() });
+      addLog('publish', `已手动添加进资源库（同行：${targetDomain}）`, 'info', url);
+      const rt = getState().publishRuntime;
+      if (rt && rt.resourceUrl === url) {
+        rt.uiStatus = { key: 'asstResourceAdded' };
+        await this.notify(['publishRuntime', 'logs']);
+      } else {
+        await this.notify(['logs']);
+      }
+      return { ok: true };
+    } catch (e) {
+      addLog('publish', `手动添加资源库失败：${e.message}`, 'error', url);
       return { ok: false, error: e.message };
     }
   }
