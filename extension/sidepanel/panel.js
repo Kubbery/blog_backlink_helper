@@ -351,8 +351,8 @@ function renderAssistant() {
   const review = stage === 'awaiting_review';
   $('#asst-submit').disabled = !review;
   $('#asst-skip').disabled = !review;
-  // 「标记为无效资源」：绑定会话即可用（不需要 awaiting_review）
-  $('#asst-disable').disabled = !bound;
+  // 「标记为无效资源」：激活标签页是可注入网页即可用（按当前页面 URL 停用 analysis 记录，不要求绑定会话）
+  $('#asst-disable').disabled = !activeTabUrl;
   // 「备注」输入行：标记上一次 Submit 成功的发布（lastPublish），与当前标签页是否绑定无关；
   // 换了一条发布记录时把输入框重置为该记录已存的备注（无则给默认文案），同一条内保留用户输入
   const lp = snap.lastPublish || null;
