@@ -217,6 +217,7 @@ function renderLibrary() {
           <input type="checkbox" class="res-enable" data-ract="toggle" data-url="${esc(r.url)}" data-td="${esc(r.targetDomain)}" ${r.enabled !== false ? 'checked' : ''} title="${t('resEnable')}">
           <button class="icon-btn" data-ract="open" data-url="${esc(r.url)}" title="${t('resOpen')}">🔗</button>
           <button class="icon-btn" data-ract="publish" data-url="${esc(r.url)}" title="${t('resPublish')}">↗</button>
+          <button class="icon-btn danger" data-ract="delete" data-url="${esc(r.url)}" data-td="${esc(r.targetDomain)}" title="${t('resDelete')}">🗑</button>
         </span>
       </div>`;
       }).join('')}`;
@@ -734,6 +735,15 @@ function bindEvents() {
       } catch (err) {
         toast(err.message, 'error');
       }
+    }
+    if (btn.dataset.ract === 'delete') {
+      // 同行域名参与主键（同一 url 可能被多个目标域名收集到），按 [targetDomain, url] 精确定位
+      const row = (libraryRows || []).find((r) => r.url === url && r.targetDomain === btn.dataset.td);
+      if (!row) return;
+      if (!confirm(t('confirmDeleteResource'))) return;
+      libraryRows = (libraryRows || []).filter((r) => !(r.url === row.url && r.targetDomain === row.targetDomain));
+      renderLibrary();
+      await act({ type: 'deleteLibraryResource', targetDomain: row.targetDomain, url: row.url });
     }
   });
 

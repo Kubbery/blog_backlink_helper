@@ -34,12 +34,12 @@ globalThis.chrome = {
   tabs: { onRemoved: capture('onRemoved'), onUpdated: capture('onUpdated') },
 };
 
-let idbPutAll, getState, resetStatsRefreshDebounce;
+let idbPutAll, idbGetAll, getState, resetStatsRefreshDebounce;
 const sendMsg = (msg) => new Promise((resolve) => listeners.onMessage(msg, {}, resolve));
 
 before(async () => {
   ({ resetStatsRefreshDebounce } = await import('../extension/background/service-worker.js'));
-  ({ idbPutAll } = await import('../extension/lib/idb.js'));
+  ({ idbPutAll, idbGetAll } = await import('../extension/lib/idb.js'));
   ({ getState } = await import('../extension/lib/storage.js'));
 
   storeData.bcm_store = {
@@ -215,4 +215,23 @@ test('setAssistantTask：保存助手页「当前任务」配置并随快照下�
   // 持久化：重新 getSnapshot 仍在
   const res2 = await sendMsg({ type: 'getSnapshot' });
   assert.equal(res2.snapshot.assistantTask.targetUrl, 'https://www.canva.com/');
+});
+
+test('deleteLibraryResource：同时删除 analysis 与 backlinks 记录，资源库剔除该资源', async () => {
+  const res = await sendMsg({ type: 'deleteLibraryResource', targetDomain: 'example.com', url: 'https://a.com/2' });
+  assert.equal(res.ok, true);
+  // 资源库只剩 a.com/1（a.com/3 本来就是 invalid 不入选）
+  const lib = await sendMsg({ type: 'getLibraryResources' });
+  assert.deepEqual(lib.resources.map((r) => r.url), ['https://a.com/1']);
+  // backlinks 同步删除：不会回到「队列中」被下次分析重跑回库
+  const links = await idbGetAll('backlinks');
+  assert.equal(links.some((r) => r.url === 'https://a.com/2'), false);
+  assert.equal(links.some((r) => r.url === 'https://a.com/1'), true); // 其它记录不受影响
+  // 快照资源同步剔除
+  assert.deepEqual(res.snapshot.resources.map((r) => r.url), ['https://a.com/1']);
+});
+
+test('deleteLibraryResource：缺少 URL 拒绝', async () => {
+  const res = await sendMsg({ type: 'deleteLibraryResource', targetDomain: 'example.com', url: '' });
+  assert.equal(res.ok, false);
 });

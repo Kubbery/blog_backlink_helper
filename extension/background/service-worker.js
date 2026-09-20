@@ -301,6 +301,21 @@ async function handleMessage(msg, sender) {
       return { ok: true, snapshot: await snapshot() };
     }
 
+    // 资源库行内删除：同时删 analysis 与 backlinks 记录（只删 analysis 的话，该外链会回到「队列中」，下次「开始分析」又重跑回库）；
+    // published 发布历史保留
+    case 'deleteLibraryResource': {
+      const key = [msg.targetDomain || '', msg.url || ''];
+      if (!key[1]) return { ok: false, error: '缺少资源 URL' };
+      await idbDelete('analysis', key).catch((e) =>
+        addLog('system', `删除资源失败（analysis）：${e.message}`, 'warn', key[1]));
+      await idbDelete('backlinks', key).catch((e) =>
+        addLog('system', `删除资源失败（backlinks）：${e.message}`, 'warn', key[1]));
+      addLog('system', `已删除资源：${key[1]}`, 'info', key[1]);
+      await save('logs');
+      broadcast();
+      return { ok: true, snapshot: await snapshot() };
+    }
+
     // ---- 任务模板（存 IndexedDB templates 表，主键 name）：助手页「当前任务」从这里选择填充 ----
     case 'getTemplates': {
       const templates = await idbGetAll('templates').catch(() => []);
