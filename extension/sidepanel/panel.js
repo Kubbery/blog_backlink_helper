@@ -15,6 +15,8 @@ let snap = null;
 const filters = { type: 'all', status: null };
 // 资源库列表：点击「资源库」Tab 时从 IndexedDB analysis 表加载（不经快照内存态）
 let libraryRows = null;
+// 资源库分组折叠状态（面板会话内存，按同行域名记忆）
+const collapsedGroups = new Set();
 // 当前激活标签页 URL（助手页的默认操作对象；仅 http/https 可注入）
 let activeTabUrl = '';
 
@@ -191,12 +193,15 @@ function renderLibrary() {
     groups.get(key).push(r);
   }
   const sortedGroups = [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0]));
-  list.innerHTML = sortedGroups.map(([td, rows]) => `
+  list.innerHTML = sortedGroups.map(([td, rows]) => {
+    const folded = collapsedGroups.has(td);
+    return `
       <div class="res-group-head">
+        <button class="g-fold" data-gfold="${esc(td)}" title="${t(folded ? 'resExpand' : 'resCollapse')}">${folded ? '▸' : '▾'}</button>
         <span class="g-domain">${esc(td || '—')}</span>
         <span class="g-count">${rows.length}</span>
       </div>
-      ${rows.map((r) => {
+      ${folded ? '' : rows.map((r) => {
         const fav = `<img class="fav" src="${chrome.runtime.getURL('/_favicon/?pageUrl=' + encodeURIComponent(r.url) + '&clientId=bcm')}" onerror="this.style.display='none'">`;
         const short = r.domain + (r.url.replace(/^https?:\/\/[^/]+/, '').length > 1 ? r.url.replace(/^https?:\/\/[^/]+/, '') : '');
         return `
@@ -211,7 +216,8 @@ function renderLibrary() {
           <button class="icon-btn" data-ract="publish" data-url="${esc(r.url)}" title="${t('resPublish')}">↗</button>
         </span>
       </div>`;
-      }).join('')}`).join('');
+      }).join('')}`;
+  }).join('');
 }
 
 /* ---- 助手（发布主操作台：操作对象 = 当前激活标签页）---- */
@@ -651,6 +657,15 @@ function bindEvents() {
 
   // 资源行内操作
   $('#res-list').addEventListener('click', async (e) => {
+    // 分组折叠/展开
+    const fold = e.target.closest('button[data-gfold]');
+    if (fold) {
+      const td = fold.dataset.gfold;
+      if (collapsedGroups.has(td)) collapsedGroups.delete(td);
+      else collapsedGroups.add(td);
+      renderLibrary();
+      return;
+    }
     const btn = e.target.closest('button[data-ract]');
     if (!btn) return;
     const url = btn.dataset.url;
