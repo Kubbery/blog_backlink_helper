@@ -263,7 +263,10 @@ function activateTab(name) {
 /** 刷新当前激活标签页（助手页的操作对象），随后重渲染助手区 */
 async function refreshActiveTab() {
   try {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    let [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab) {
+      [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    }
     activeTabUrl = tab && /^https?:/.test(tab.url || '') ? tab.url : '';
   } catch {
     activeTabUrl = '';
@@ -385,9 +388,10 @@ function renderAssistant() {
     });
   });
 
-  // 定位同行网站 / 换一个：激活标签页是可注入网页即可用
+  // 定位同行网站：激活标签页是可注入网页即可用
   $('#asst-locate').disabled = !activeTabUrl;
-  $('#asst-next').disabled = !activeTabUrl;
+  // 换一个：只要当前无步骤在执行即可用（不限制当前是否为可注入网页）
+  $('#asst-next').disabled = !!asstStepBusy;
   // Submit / Skip：仅绑定会话且 awaiting_review（表单已填好待确认）解锁
   const review = stage === 'awaiting_review';
   $('#asst-submit').disabled = !review;
@@ -565,10 +569,15 @@ async function pickNext() {
   const btn = $('#asst-next');
   btn.disabled = true;
   try {
-    const res = await send({ type: 'pickNextResource' });
+    let [tab] = await chrome.tabs.query({ active: true, currentWindow: true }).catch(() => []);
+    if (!tab) [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true }).catch(() => []);
+    const res = await send({ type: 'pickNextResource', tabId: tab ? tab.id : null });
     if (res && res.ok === false) toast(res.error || t('asstNoMore'), 'error');
+    await refreshActiveTab();
   } catch (e) {
     toast(e.message, 'error');
+  } finally {
+    btn.disabled = false;
   }
   renderAssistant();
 }
@@ -892,9 +901,12 @@ function bindEvents() {
     // 立即发布：把当前激活标签页导航到该资源 URL（同行域名随消息带给后台），随后到助手页执行各步骤
     if (btn.dataset.ract === 'publish') {
       try {
-        const nav = await send({ type: 'pub:navigate', url: res.url, refDomain: res.targetDomain || '' });
+        let [tab] = await chrome.tabs.query({ active: true, currentWindow: true }).catch(() => []);
+        if (!tab) [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true }).catch(() => []);
+        const nav = await send({ type: 'pub:navigate', url: res.url, refDomain: res.targetDomain || '', tabId: tab ? tab.id : null });
         if (nav && nav.ok === false) return toast(nav.error || t('asstNoPage'), 'error');
         activateTab('assistant');
+        await refreshActiveTab();
       } catch (err) {
         toast(err.message, 'error');
       }

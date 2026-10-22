@@ -18,6 +18,8 @@ installIdbStub();
 const storeData = {};
 // addCurrentResource 取当前激活标签页：用可变桩模拟（默认一个可注入网页）
 let activeTabUrl = 'https://active-tab.com/post';
+let lastUpdatedTab = null;
+let lastCreatedTab = null;
 globalThis.chrome = {
   storage: {
     local: {
@@ -27,7 +29,17 @@ globalThis.chrome = {
     },
   },
   tabs: {
-    query: async () => (activeTabUrl ? [{ id: 1, url: activeTabUrl }] : []),
+    query: async () => (activeTabUrl !== null ? [{ id: 1, url: activeTabUrl }] : []),
+    update: async (tabId, opt) => {
+      lastUpdatedTab = { tabId, ...opt };
+      activeTabUrl = opt.url;
+      return { id: tabId, ...opt };
+    },
+    create: async (opt) => {
+      lastCreatedTab = { id: 99, ...opt };
+      activeTabUrl = opt.url;
+      return { id: 99, ...opt };
+    },
   },
 };
 
@@ -144,3 +156,39 @@ test('markAsPublished：目标地址为空（任务与身份网址都缺）→ �
   const rows = (await idbGetAll('published')).filter((r) => r.url === 'https://no-target.com/p');
   assert.equal(rows.length, 0);
 });
+
+test('navigateTo：当前在新标签页（chrome://newtab）时能够成功导航当前标签页', async () => {
+  const a = assistant();
+  activeTabUrl = 'chrome://newtab/';
+  lastUpdatedTab = null;
+  const res = await a.navigateTo('https://blog.com/resource-1', 'peer.com');
+  assert.equal(res.ok, true);
+  assert.equal(res.url, 'https://blog.com/resource-1');
+  assert.equal(lastUpdatedTab.tabId, 1);
+  assert.equal(lastUpdatedTab.url, 'https://blog.com/resource-1');
+  assert.equal(a.pendingRef.domain, 'peer.com');
+});
+
+test('navigateTo：当前无激活标签页时自动新建标签页兜底', async () => {
+  const a = assistant();
+  activeTabUrl = null;
+  lastCreatedTab = null;
+  const res = await a.navigateTo('https://blog.com/resource-2', 'peer2.com');
+  assert.equal(res.ok, true);
+  assert.equal(res.url, 'https://blog.com/resource-2');
+  assert.equal(lastCreatedTab.id, 99);
+  assert.equal(lastCreatedTab.url, 'https://blog.com/resource-2');
+});
+
+test('pickNext：当前停留在新标签页时也能挑出未发布资源并成功导航', async () => {
+  const a = assistant();
+  activeTabUrl = 'chrome://newtab/';
+  await idbPutAll('analysis', [
+    { targetDomain: 'peer-c.com', url: 'https://blog-c.com/p1', status: 'ready', checkedAt: Date.now() },
+  ]);
+  const res = await a.pickNext();
+  assert.equal(res.ok, true);
+  assert.equal(res.url, 'https://blog-c.com/p1');
+  assert.equal(lastUpdatedTab.url, 'https://blog-c.com/p1');
+});
+

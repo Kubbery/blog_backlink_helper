@@ -968,12 +968,12 @@ async function handleMessage(msg, sender) {
 
     case 'pub:navigate': {
       // 资源库「立即发布」：当前激活标签页导航到该资源（同行域名随消息带上，bind 时优先使用）
-      return await publish.navigateTo(msg.url, msg.refDomain);
+      return await publish.navigateTo(msg.url, msg.refDomain, msg.tabId);
     }
 
     case 'pickNextResource': {
       // 助手页「换一个」：当前激活标签页导航到资源库中未发布过的下一条资源
-      return await publish.pickNext();
+      return await publish.pickNext({ tabId: msg.tabId, targetUrl: msg.targetUrl });
     }
 
     default:

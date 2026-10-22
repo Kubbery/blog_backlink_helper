@@ -57,8 +57,30 @@ export class PublishAssistant {
 
   /** 当前激活标签页（助手页的默认操作对象）；非 http(s) 页面不可操作，返回 null */
   async activeTab() {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    let [tab] = await chrome.tabs.query({ active: true, currentWindow: true }).catch(() => []);
+    if (!tab) {
+      [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true }).catch(() => []);
+    }
     return tab && /^https?:/.test(tab.url || '') ? tab : null;
+  }
+
+  /**
+   * 获取可用于导航的当前标签页（立即发布 / 换一个）：
+   * 不受限于当前是否为 http(s) 页面（chrome://newtab、空白页等均可被导航）；
+   * 若提供 hintTabId 则优先使用，否则查询当前/最后聚焦窗口的激活标签页。
+   */
+  async navigableTab(hintTabId) {
+    if (hintTabId && chrome.tabs?.get) {
+      try {
+        const t = await chrome.tabs.get(hintTabId);
+        if (t && t.id) return t;
+      } catch { /* 忽略无效或已关闭的 tabId */ }
+    }
+    let [tab] = await chrome.tabs.query({ active: true, currentWindow: true }).catch(() => []);
+    if (!tab || !tab.id) {
+      [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true }).catch(() => []);
+    }
+    return tab && tab.id ? tab : null;
   }
 
   /** 当前任务配置：助手页「当前任务」字段，目标地址缺省回落到设置里的身份网址 */
@@ -619,25 +641,50 @@ export class PublishAssistant {
    * 对当前任务目标地址无记录；ready 优先于 captcha，同档按命中时间新→旧。
    */
   /** 资源库「立即发布」：当前激活标签页导航到指定资源，并记下该资源来自的同行域名（供 bind 使用） */
-  async navigateTo(url, refDomain) {
-    const tab = await this.activeTab();
-    if (!tab) return { ok: false, error: '当前标签页不可导航' };
+  /** 资源库「立即发布」：当前激活标签页导航到指定资源，并记下该资源来自的同行域名（供 bind 使用） */
+  async navigateTo(url, refDomain, hintTabId) {
+    if (!url) return { ok: false, error: '目标地址为空' };
     this.pendingRef = { url, domain: refDomain || '' };
-    await chrome.tabs.update(tab.id, { url });
-    addLog('publish', '立即发布：已在当前标签页打开资源', 'info', url);
+    const tab = await this.navigableTab(hintTabId);
+    let targetTabId = null;
+    if (tab && tab.id) {
+      try {
+        await chrome.tabs.update(tab.id, { url, active: true });
+        targetTabId = tab.id;
+      } catch {
+        // 当前标签页不可导航（如内部特殊页面禁止 update），新建标签页兜底
+        const created = await chrome.tabs.create({ url, active: true }).catch(() => null);
+        targetTabId = created ? created.id : null;
+      }
+    } else {
+      const created = await chrome.tabs.create({ url, active: true }).catch(() => null);
+      targetTabId = created ? created.id : null;
+    }
+    addLog('publish', '立即发布：已在标签页打开资源', 'info', url);
     await this.notify(['logs']);
-    return { ok: true, url };
+    return { ok: true, url, tabId: targetTabId };
   }
 
-  async pickNext() {
-    const tab = await this.activeTab();
-    if (!tab) return { ok: false, error: '当前标签页不可导航' };
+  async pickNext(arg) {
+    let targetOverride = '';
+    let hintTabId = null;
+    if (typeof arg === 'string' && /^https?:/.test(arg)) {
+      targetOverride = arg;
+    } else if (typeof arg === 'number') {
+      hintTabId = arg;
+    } else if (arg && typeof arg === 'object') {
+      targetOverride = arg.targetUrl || '';
+      hintTabId = arg.tabId || null;
+    }
+
+    const tab = await this.navigableTab(hintTabId);
+    const curUrl = tab ? (tab.url || '') : '';
     const [analysis, published, blacklist] = await Promise.all([
       idbGetAll('analysis').catch(() => []),
       idbGetAll('published').catch(() => []),
       idbGetAll('blacklist').catch(() => []),
     ]);
-    const target = this.taskConfig().targetUrl;
+    const target = targetOverride || this.taskConfig().targetUrl;
     const pubUrls = new Set(published.filter((r) => r && r.targetUrl === target).map((r) => r.url));
     const blackSet = new Set(blacklist.map((b) => b.domain));
     const settings = getState().settings || {};
@@ -668,7 +715,7 @@ export class PublishAssistant {
     const candidates = analysis
       .filter((r) => {
         if (!r || !r.url || r.enabled === false) return false;
-        if (r.url === tab.url || pubUrls.has(r.url)) return false;
+        if ((curUrl && r.url === curUrl) || pubUrls.has(r.url)) return false;
         // 遇到验证码直接跳过（可由 settings.skipOnCaptcha 控制）
         if (settings.skipOnCaptcha !== false && r.status === 'captcha') return false;
         if (r.status !== 'ready' && r.status !== 'captcha') return false;
@@ -710,9 +757,21 @@ export class PublishAssistant {
     if (!candidates.length) return { ok: false, error: '资源库中没有符合频控条件的未发布资源了' };
     const url = candidates[0].url;
     this.pendingRef = { url, domain: candidates[0].targetDomain || '' };
-    await chrome.tabs.update(tab.id, { url });
-    addLog('publish', '换一个：已在当前标签页打开下一条未发布资源（横向优先排序）', 'info', url);
+    let targetTabId = null;
+    if (tab && tab.id) {
+      try {
+        await chrome.tabs.update(tab.id, { url, active: true });
+        targetTabId = tab.id;
+      } catch {
+        const created = await chrome.tabs.create({ url, active: true }).catch(() => null);
+        targetTabId = created ? created.id : null;
+      }
+    } else {
+      const created = await chrome.tabs.create({ url, active: true }).catch(() => null);
+      targetTabId = created ? created.id : null;
+    }
+    addLog('publish', '换一个：已在标签页打开下一条未发布资源（横向优先排序）', 'info', url);
     await this.notify(['logs']);
-    return { ok: true, url };
+    return { ok: true, url, domain: candidates[0].targetDomain || '', tabId: targetTabId };
   }
 }
