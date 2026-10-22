@@ -92,7 +92,14 @@
           </div>
           <div class="form-row">
             <label class="field-label" data-i18n="targetUrl">目标地址（用于评论正文内嵌链接）</label>
-            <input type="text" id="at-url" placeholder="https://www.canva.com/" spellcheck="false" />
+            <div class="input-row">
+              <input type="text" id="at-url" placeholder="https://www.canva.com/" spellcheck="false" />
+              <button id="at-use-active-tab" class="btn btn-outline btn-sm" style="flex-shrink:0; white-space:nowrap;" data-i18n="useActiveTab" data-i18n-title="useActiveTabTitle">使用当前页</button>
+            </div>
+            <div class="input-row" style="margin-top:6px; gap:8px;">
+              <button id="at-import-rule" class="btn btn-outline btn-sm" style="flex:1" data-i18n="importRule" data-i18n-title="importRuleTitle">⚡ 程序导入</button>
+              <button id="at-import-ai" class="btn btn-primary btn-sm" style="flex:1" data-i18n="importAi" data-i18n-title="importAiTitle">✨ AI 导入</button>
+            </div>
           </div>
           <div class="form-row">
             <label class="field-label" data-i18n="siteIntro">网站介绍（一两句，供 AI 生成评论）</label>

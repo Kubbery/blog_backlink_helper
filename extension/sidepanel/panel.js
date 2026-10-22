@@ -575,6 +575,78 @@ async function pickNext() {
 
 /* ---- 助手页「当前任务」与模板 ---- */
 
+async function runExtractSiteInfo(mode = 'rule') {
+  const isAi = mode === 'ai';
+  const btn = isAi ? $('#at-import-ai') : $('#at-import-rule');
+  const otherBtn = isAi ? $('#at-import-rule') : $('#at-import-ai');
+
+  if (!activeTabUrl) await refreshActiveTab();
+
+  let url = $('#at-url').value.trim();
+  if (!url && activeTabUrl) {
+    url = activeTabUrl;
+    $('#at-url').value = url;
+  }
+  if (!url) {
+    return toast(t('enterTargetUrlFirst'), 'error');
+  }
+  if (!/^https?:\/\//i.test(url)) {
+    url = 'https://' + url;
+    $('#at-url').value = url;
+  }
+
+  if (isAi && snap?.settings && !snap.settings.hasKey) {
+    return toast(t('aiKeyNeededForAiImport'), 'error');
+  }
+
+  // 展开「当前任务」详情，便于看到提取到的内容
+  if (asstTaskCollapsed) {
+    asstTaskTouched = true;
+    asstTaskCollapsed = false;
+    renderAssistant();
+  }
+
+  if (btn) btn.disabled = true;
+  if (otherBtn) otherBtn.disabled = true;
+  const originalText = btn ? btn.textContent : '';
+  if (btn) btn.textContent = t(isAi ? 'importingAi' : 'importingRule');
+
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true }).catch(() => []);
+    const tabId = (tab && tab.id && samePageUrl(tab.url, url)) ? tab.id : null;
+    const res = await send({ type: 'extractSiteInfo', url, tabId, mode });
+    if (res && res.ok && res.task) {
+      $('#at-name').value = res.task.name || '';
+      $('#at-url').value = res.task.targetUrl || url;
+      $('#at-intro').value = res.task.siteIntro || '';
+      $('#at-keyword').value = res.task.mainKeyword || '';
+      if (res.snapshot) applySnapshot(res.snapshot);
+      const okMsg = res.mode === 'ai' ? t('siteInfoImportedAiDirect') : t('siteInfoImportedRuleDirect');
+      toast(okMsg, 'success');
+    } else {
+      toast((res && res.error) || t('siteFetchFailed', { error: 'unknown' }), 'error');
+    }
+  } catch (e) {
+    toast(e.message, 'error');
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = originalText;
+    }
+    if (otherBtn) otherBtn.disabled = false;
+  }
+}
+
+async function useActiveTabForTarget() {
+  if (!activeTabUrl) await refreshActiveTab();
+  if (!activeTabUrl) {
+    return toast(t('asstNoPage'), 'error');
+  }
+  $('#at-url').value = activeTabUrl;
+  send({ type: 'setAssistantTask', ...currentTaskFromFields() }).catch(() => {});
+  toast(t('saved'), 'success');
+}
+
 function currentTaskFromFields() {
   return {
     name: $('#at-name').value.trim(),
@@ -692,6 +764,12 @@ function bindEvents() {
     asstTaskCollapsed = !asstTaskCollapsed;
     renderAssistant();
   });
+
+  // 助手页「当前任务」：程序导入、AI 导入与使用当前页
+  $('#at-import-rule')?.addEventListener('click', () => runExtractSiteInfo('rule'));
+  $('#at-import-ai')?.addEventListener('click', () => runExtractSiteInfo('ai'));
+  $('#at-auto-extract')?.addEventListener('click', () => runExtractSiteInfo('rule'));
+  $('#at-use-active-tab')?.addEventListener('click', useActiveTabForTarget);
 
   // 助手页「当前任务」：字段失焦即保存（快照回来时已按聚焦态跳过回填，不打断输入）
   ['#at-name', '#at-url', '#at-intro', '#at-keyword'].forEach((sel) => {

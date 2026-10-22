@@ -274,3 +274,35 @@ export async function discoverLinks(html, baseUrl) {
   const out = await chatJSON('discover', system, user, { maxTokens: 2500, temperature: 0.1 });
   return Array.isArray(out.links) ? out.links.filter((u) => typeof u === 'string' && /^https?:\/\//.test(u)) : [];
 }
+
+/**
+ * 智能提炼网站信息：根据目标网站的 URL、标题、描述与正文，智能提炼出任务名称、网站介绍、主关键词。
+ * lang ∈ zh/en（生成文案的语言，与设置保持一致，默认中文）；
+ * 返回 { name, siteIntro, mainKeyword }
+ */
+export async function extractSiteInfoAI({ url, title, siteName = '', description = '', keywords = '', text = '', lang = 'zh' }) {
+  const langName = lang === 'en' ? '英文' : '中文';
+  const system = [
+    '你是网站分析与外链建设助手。阅读给定网站的 URL、标题、描述与正文摘录，提炼并返回三项信息，供后续在博客评论中留外链使用：',
+    `1. name: 网站/产品品牌名称。必须简短干练（如 "Canva"、"Notion"、"Sprunki"），去除任何 SEO 修饰词、标语或标点；`,
+    `2. siteIntro: 网站介绍。用 1-2 句流畅的${langName}清晰概括该网站的核心定位、主要功能或服务，适合直接作为生成评论时的上下文参考；`,
+    `3. mainKeyword: 主关键词。提取该网站最核心的 1 个或 2 个产品/服务关键词（如 "在线设计工具"、"AI video generator"），适合后续做锚文本同义词拓展。`,
+    '只输出 JSON：{"name":"...","siteIntro":"...","mainKeyword":"..."}',
+  ].join('\n');
+  const user = [
+    `目标 URL: ${url}`,
+    `网页标题: ${title || '(无)'}`,
+    `站点名称: ${siteName || '(无)'}`,
+    `页面描述: ${description || '(无)'}`,
+    `关键词标签: ${keywords || '(无)'}`,
+    '正文摘录:',
+    (text || '').slice(0, LIMITS.articleTextChunk || 3000),
+  ].join('\n');
+  const out = await chatJSON('classify', system, user, { maxTokens: 800, temperature: 0.2 });
+  const name = String(out.name || '').trim().slice(0, 40);
+  const siteIntro = String(out.siteIntro || '').trim().slice(0, 300);
+  const mainKeyword = String(out.mainKeyword || '').trim().slice(0, 60);
+  if (!name && !siteIntro) throw new Error('AI 未能提取出有效的网站信息');
+  return { name, siteIntro, mainKeyword };
+}
+

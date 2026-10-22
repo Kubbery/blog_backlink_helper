@@ -4,11 +4,13 @@
 import {
   load, getState, save, clearAll, addLog, domainOf,
 } from '../lib/storage.js';
-import { backlinksCsv, waitTabComplete, sleep } from '../lib/util.js';
+import {
+  backlinksCsv, waitTabComplete, sleep, parseSiteMetadata, ruleExtractSiteInfo, samePageUrl,
+} from '../lib/util.js';
 import { idbGet, idbGetDomain, idbGetAll, idbPut, idbPutAll, idbDelete } from '../lib/idb.js';
 import { CollectController } from './collect.js';
 import { PublishAssistant } from './publish.js';
-import { testKey } from '../lib/openrouter.js';
+import { testKey, extractSiteInfoAI } from '../lib/openrouter.js';
 import { runVerifyDue } from './verify.js';
 
 const ALARM_TICK = 'bcm-tick';
@@ -438,6 +440,156 @@ async function handleMessage(msg, sender) {
       await save('assistantTask');
       broadcast();
       return { ok: true, snapshot: await snapshot() };
+    }
+
+    // 助手页「当前任务」：根据目标网址自动抓取并提取网站名称、介绍、主关键词（AI 优先，规则兜底）
+    case 'extractSiteInfo': {
+      let rawUrl = (msg.url || '').trim();
+      if (!rawUrl) return { ok: false, error: '目标网址不能为空' };
+      if (!/^https?:\/\//i.test(rawUrl)) rawUrl = 'https://' + rawUrl;
+
+      let parsedMeta = null;
+
+      // 1. 若当前激活标签页正好是该网址，优先通过 DOM 提取（支持 SPA 渲染后的完整 DOM）
+      try {
+        if (typeof chrome !== 'undefined' && chrome.scripting?.executeScript) {
+          let targetTabId = msg.tabId;
+          if (!targetTabId && chrome.tabs?.query) {
+            const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+            if (activeTab && activeTab.id && activeTab.url && samePageUrl(activeTab.url, rawUrl)) {
+              targetTabId = activeTab.id;
+            }
+          }
+          if (targetTabId) {
+            const [res] = await chrome.scripting.executeScript({
+              target: { tabId: targetTabId, frameIds: [0] },
+              func: () => {
+                const q = (sel) => document.querySelector(sel)?.content || '';
+                const title = (document.querySelector('title')?.textContent || document.title || '').trim();
+                const siteName = q('meta[property="og:site_name"]') || q('meta[name="application-name"]');
+                const description = q('meta[name="description"]') || q('meta[property="og:description"]') || q('meta[name="twitter:description"]');
+                const keywords = q('meta[name="keywords"]') || q('meta[name="news_keywords"]');
+                const bodyClone = document.body ? document.body.cloneNode(true) : null;
+                if (bodyClone) {
+                  bodyClone.querySelectorAll('script,style,noscript,svg,nav,header,footer').forEach((el) => el.remove());
+                }
+                const text = (bodyClone?.innerText || '').replace(/\s+/g, ' ').slice(0, 3000);
+                return { title, siteName, description, keywords, text };
+              },
+            });
+            if (res && res.result && (res.result.title || res.result.text)) {
+              parsedMeta = { url: rawUrl, ...res.result };
+            }
+          }
+        }
+      } catch {
+        // executeScript 失败或不可注入，继续走 HTTP fetch
+      }
+
+      // 2. 如果未能从 DOM 读取，后台 fetch(rawUrl)
+      if (!parsedMeta) {
+        try {
+          const ctrl = new AbortController();
+          const timer = setTimeout(() => ctrl.abort(), 15000);
+          const resp = await fetch(rawUrl, {
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+              'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            },
+            signal: ctrl.signal,
+          });
+          clearTimeout(timer);
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+          const html = await resp.text();
+          parsedMeta = parseSiteMetadata(html, rawUrl);
+        } catch (e) {
+          addLog('system', `获取网站内容失败(${rawUrl}): ${e.message}`, 'warn', rawUrl);
+          return { ok: false, error: `无法获取目标网站内容：${e.message}` };
+        }
+      }
+
+      const st = getState();
+      let taskData = null;
+      let usedMode = 'rule';
+      const reqMode = msg.mode || 'auto';
+
+      if (reqMode === 'rule') {
+        // 纯程序导入：直接由规则从 DOM/HTML 提取原标题、描述与关键词，不走 AI
+        const ruleData = ruleExtractSiteInfo(parsedMeta);
+        taskData = {
+          name: ruleData.name,
+          targetUrl: rawUrl,
+          siteIntro: ruleData.siteIntro,
+          mainKeyword: ruleData.mainKeyword,
+        };
+        usedMode = 'rule';
+        addLog('system', `网站信息程序直接导入完成：${taskData.name || rawUrl}`, 'info', rawUrl);
+      } else if (reqMode === 'ai') {
+        // AI 导入：使用 AI 进行提炼，未配置 Key 或失败明确提示
+        if (!st.settings?.openrouterKey) {
+          return { ok: false, error: '未配置 OpenRouter API Key，请先到设置页填写或使用「程序导入」' };
+        }
+        try {
+          const aiResult = await extractSiteInfoAI({
+            ...parsedMeta,
+            lang: st.settings?.summaryLang || st.settings?.language || 'zh',
+          });
+          taskData = {
+            name: aiResult.name || parsedMeta.siteName || '',
+            targetUrl: rawUrl,
+            siteIntro: aiResult.siteIntro || parsedMeta.description || '',
+            mainKeyword: aiResult.mainKeyword || '',
+          };
+          usedMode = 'ai';
+          addLog('ai', `网站信息 AI 智能提炼成功：${taskData.name || rawUrl}`, 'info', rawUrl);
+        } catch (e) {
+          addLog('ai', `网站信息 AI 提炼失败: ${e.message}`, 'warn', rawUrl);
+          return { ok: false, error: `AI 智能提炼失败: ${e.message}` };
+        }
+      } else {
+        // 自动/混合模式（兼容单测与旧调用）：AI 优先，规则兜底
+        if (st.settings?.openrouterKey) {
+          try {
+            const aiResult = await extractSiteInfoAI({
+              ...parsedMeta,
+              lang: st.settings?.summaryLang || st.settings?.language || 'zh',
+            });
+            taskData = {
+              name: aiResult.name || parsedMeta.siteName || '',
+              targetUrl: rawUrl,
+              siteIntro: aiResult.siteIntro || parsedMeta.description || '',
+              mainKeyword: aiResult.mainKeyword || '',
+            };
+            usedMode = 'ai';
+            addLog('ai', `网站信息 AI 智能提取成功：${taskData.name || rawUrl}`, 'info', rawUrl);
+          } catch (e) {
+            addLog('ai', `网站信息 AI 提取失败，降级为规则提取: ${e.message}`, 'warn', rawUrl);
+          }
+        }
+        if (!taskData) {
+          const ruleData = ruleExtractSiteInfo(parsedMeta);
+          taskData = {
+            name: ruleData.name,
+            targetUrl: rawUrl,
+            siteIntro: ruleData.siteIntro,
+            mainKeyword: ruleData.mainKeyword,
+          };
+          usedMode = 'rule';
+          addLog('system', `网站信息规则提取完成：${taskData.name || rawUrl}`, 'info', rawUrl);
+        }
+      }
+
+      // 5. 保存至 assistantTask 并广播快照
+      st.assistantTask = taskData;
+      await save('assistantTask', 'logs');
+      broadcast();
+
+      return {
+        ok: true,
+        task: taskData,
+        mode: usedMode,
+        snapshot: await snapshot(),
+      };
     }
 
     // 资源库：直接读 IndexedDB analysis 表，取命中结论（ready/captcha，验证码资源也算命中）的记录（不经内存态）

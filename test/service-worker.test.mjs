@@ -249,3 +249,118 @@ test('setSettings：保存 autoSpamClean 与 spamCleanIntervalHours 并随快照
   assert.equal(res.snapshot.settings.spamCleanIntervalHours, 48);
 });
 
+test('extractSiteInfo：根据 URL 抓取页面并提取网站信息（无 AI 时规则兜底）', async () => {
+  const oldFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    text: async () => `
+      <html>
+        <head>
+          <title>Free Graphic Design | Canva</title>
+          <meta property="og:site_name" content="Canva">
+          <meta name="description" content="Design presentation and social media posts.">
+          <meta name="keywords" content="design app, poster maker">
+        </head>
+        <body><p>Canva is a free-to-use online graphic design tool.</p></body>
+      </html>
+    `,
+  });
+  const res = await sendMsg({ type: 'extractSiteInfo', url: 'https://www.canva.com' });
+  globalThis.fetch = oldFetch;
+
+  assert.equal(res.ok, true);
+  assert.equal(res.task.name, 'Canva');
+  assert.equal(res.task.targetUrl, 'https://www.canva.com');
+  assert.equal(res.task.siteIntro, 'Design presentation and social media posts.');
+  assert.equal(res.task.mainKeyword, 'design app');
+  assert.equal(res.mode, 'rule');
+  assert.equal(res.snapshot.assistantTask.name, 'Canva');
+});
+
+test('extractSiteInfo：有 OpenRouter Key 时走 AI 智能提取', async () => {
+  const oldFetch = globalThis.fetch;
+  const st = getState();
+  st.settings.openrouterKey = 'test-key';
+  globalThis.fetch = async (url) => {
+    if (String(url).includes('openrouter.ai')) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{
+            message: {
+              content: JSON.stringify({
+                name: 'Canva',
+                siteIntro: 'Canva 是一个知名的在线设计与内容创作平台。',
+                mainKeyword: '在线设计工具',
+              }),
+            },
+          }],
+        }),
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      text: async () => `<html><head><title>Canva</title></head><body><p>Canva home</p></body></html>`,
+    };
+  };
+  const res = await sendMsg({ type: 'extractSiteInfo', url: 'https://www.canva.com' });
+  globalThis.fetch = oldFetch;
+  st.settings.openrouterKey = '';
+
+  assert.equal(res.ok, true);
+  assert.equal(res.mode, 'ai');
+  assert.equal(res.task.name, 'Canva');
+  assert.equal(res.task.siteIntro, 'Canva 是一个知名的在线设计与内容创作平台。');
+  assert.equal(res.task.mainKeyword, '在线设计工具');
+  assert.equal(res.snapshot.assistantTask.mainKeyword, '在线设计工具');
+});
+
+test('extractSiteInfo：mode="rule" 时即使配置了 Key 也只走程序提取，不调用 AI', async () => {
+  const oldFetch = globalThis.fetch;
+  const st = getState();
+  st.settings.openrouterKey = 'test-key';
+  let aiCalled = false;
+  globalThis.fetch = async (url) => {
+    if (String(url).includes('openrouter.ai')) {
+      aiCalled = true;
+      throw new Error('不应调用 AI');
+    }
+    return {
+      ok: true,
+      status: 200,
+      text: async () => `
+        <html>
+          <head>
+            <title>Canva Graphic Tool</title>
+            <meta property="og:site_name" content="Canva">
+            <meta name="description" content="Online graphic tool.">
+          </head>
+          <body><p>Canva body</p></body>
+        </html>
+      `,
+    };
+  };
+  const res = await sendMsg({ type: 'extractSiteInfo', url: 'https://www.canva.com', mode: 'rule' });
+  globalThis.fetch = oldFetch;
+  st.settings.openrouterKey = '';
+
+  assert.equal(res.ok, true);
+  assert.equal(res.mode, 'rule');
+  assert.equal(aiCalled, false, '程序导入模式严禁调用 AI');
+  assert.equal(res.task.name, 'Canva');
+  assert.equal(res.task.siteIntro, 'Online graphic tool.');
+});
+
+test('extractSiteInfo：mode="ai" 未配置 Key 时明确报错拒绝', async () => {
+  const st = getState();
+  st.settings.openrouterKey = '';
+  const res = await sendMsg({ type: 'extractSiteInfo', url: 'https://www.canva.com', mode: 'ai' });
+  assert.equal(res.ok, false);
+  assert.match(res.error, /API Key/);
+});
+
+
+

@@ -178,3 +178,128 @@ export function samePageUrl(a, b) {
   const x = norm(a);
   return !!x && x === norm(b);
 }
+
+/** 从 HTML 中解码常见 HTML 实体 */
+export function decodeHtmlEntities(str) {
+  if (!str) return '';
+  return str
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&apos;/g, "'")
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(dec))
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+}
+
+/** 从 HTML 字符串解析网站元数据（标题、描述、关键词、站点名称、核心文本） */
+export function parseSiteMetadata(html, url = '') {
+  if (!html) return { url, title: '', siteName: '', description: '', keywords: '', text: '' };
+
+  const s = String(html);
+
+  // 1. Title
+  let title = '';
+  const titleMatch = s.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  if (titleMatch) title = decodeHtmlEntities(titleMatch[1]).replace(/\s+/g, ' ').trim();
+
+  // 2. Meta tags
+  let siteName = '';
+  let description = '';
+  let keywords = '';
+
+  const metaRegex = /<meta\b[^>]*>/gi;
+  let m;
+  while ((m = metaRegex.exec(s))) {
+    const tag = m[0];
+    const nameMatch = tag.match(/(?:name|property)=["']([^"']+)["']/i);
+    const contentMatch = tag.match(/content=["']([^"']*)["']/i);
+    if (!nameMatch || !contentMatch) continue;
+    const name = nameMatch[1].toLowerCase();
+    const content = decodeHtmlEntities(contentMatch[1]).trim();
+    if (!content) continue;
+
+    if (!siteName && (name === 'og:site_name' || name === 'application-name')) {
+      siteName = content;
+    }
+    if (!description && (name === 'description' || name === 'og:description' || name === 'twitter:description')) {
+      description = content;
+    }
+    if (!keywords && (name === 'keywords' || name === 'news_keywords')) {
+      keywords = content;
+    }
+  }
+
+  // 3. Main text: 移除 script, style, svg, noscript 等标签
+  let text = s
+    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, ' ')
+    .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, ' ')
+    .replace(/<noscript\b[^<]*(?:(?!<\/noscript>)<[^<]*)*<\/noscript>/gi, ' ')
+    .replace(/<svg\b[^<]*(?:(?!<\/svg>)<[^<]*)*<\/svg>/gi, ' ')
+    .replace(/<header\b[^<]*(?:(?!<\/header>)<[^<]*)*<\/header>/gi, ' ')
+    .replace(/<footer\b[^<]*(?:(?!<\/footer>)<[^<]*)*<\/footer>/gi, ' ')
+    .replace(/<nav\b[^<]*(?:(?!<\/nav>)<[^<]*)*<\/nav>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ');
+  text = decodeHtmlEntities(text).replace(/\s+/g, ' ').trim().slice(0, 3000);
+
+  return { url, title, siteName, description, keywords, text };
+}
+
+/** 规则提取网站信息（当没有 AI 或 AI 失败时的纯程序降级逻辑） */
+export function ruleExtractSiteInfo({ url = '', title = '', siteName = '', description = '', keywords = '', text = '' } = {}) {
+  let hostname = '';
+  try {
+    hostname = new URL(url).hostname.replace(/^www\./, '');
+  } catch {
+    hostname = url.replace(/^https?:\/\//i, '').split('/')[0].replace(/^www\./, '');
+  }
+  const hostBrand = hostname ? (hostname.split('.')[0] || '').replace(/[-_]/g, ' ') : '';
+  const capitalizedHostBrand = hostBrand ? hostBrand.charAt(0).toUpperCase() + hostBrand.slice(1) : '';
+
+  // 1. name: siteName || title 分割取干净名称 || 域名大写
+  let name = siteName;
+  if (!name && title) {
+    const parts = title.split(/[|\-–_•—:：]/).map((p) => p.trim()).filter(Boolean);
+    if (parts.length > 1) {
+      // 优先找匹配域名的部分，或者取较短的部分作为品牌名
+      const matchPart = parts.find((p) => hostBrand && p.toLowerCase().includes(hostBrand.toLowerCase()));
+      if (matchPart && matchPart.length <= 30) {
+        name = matchPart;
+      } else {
+        // 取最短且非空的片段（通常是品牌名，长片段通常是包含大量 SEO 词的副标题）
+        const sorted = [...parts].sort((a, b) => a.length - b.length);
+        name = sorted[0];
+      }
+    } else {
+      name = parts[0] || '';
+    }
+  }
+  if (!name || name.length > 40) name = capitalizedHostBrand || (name ? name.slice(0, 30) : '');
+
+  // 2. siteIntro: description || text 前 150 字
+  let intro = description || text.slice(0, 150);
+  if (intro.length > 200) intro = intro.slice(0, 200) + '…';
+
+  // 3. mainKeyword: keywords 第一项 || 从 title 提取
+  let keyword = '';
+  if (keywords) {
+    keyword = keywords.split(/[,，;|]/)[0].trim();
+  }
+  if (!keyword && title) {
+    const cleanTitle = title.replace(name, '').replace(/[|\-–_•—:：]/g, ' ').trim();
+    if (cleanTitle) {
+      const words = cleanTitle.split(/\s+/).filter(Boolean);
+      keyword = words.slice(0, 3).join(' ');
+    }
+  }
+  if (!keyword) keyword = name;
+
+  return {
+    name: name.slice(0, 40).trim(),
+    targetUrl: url,
+    siteIntro: intro.trim(),
+    mainKeyword: keyword.slice(0, 50).trim(),
+  };
+}

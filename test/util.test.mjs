@@ -84,3 +84,59 @@ test('backlinksCsv：表头/BOM/字段转义', async () => {
   assert.ok(lines[1].includes('"2025-01-02"') && lines[1].includes('"click here"'), '日期与锚文本应保留');
   assert.equal(backlinksCsv([]).split('\r\n').length, 1, '空数据只有表头');
 });
+
+test('parseSiteMetadata：解析 HTML 标题、og 属性、元数据及核心正文', async () => {
+  const { parseSiteMetadata } = await import('../extension/lib/util.js');
+  const html = `
+    <!DOCTYPE html>
+    <html>
+      <head>
+        <title>Canva: Visual Suite &amp; Design &lt;Tool&gt; | Free</title>
+        <meta property="og:site_name" content="Canva">
+        <meta name="description" content="Canva makes design amazingly simple &amp; fun for everyone.">
+        <meta name="keywords" content="design tool, graphic design, templates">
+      </head>
+      <body>
+        <script>console.log("ignore");</script>
+        <style>.hide { display:none; }</style>
+        <h1>Welcome to Canva</h1>
+        <p>Create beautiful designs with your team.</p>
+      </body>
+    </html>
+  `;
+  const meta = parseSiteMetadata(html, 'https://www.canva.com/');
+  assert.equal(meta.title, 'Canva: Visual Suite & Design <Tool> | Free');
+  assert.equal(meta.siteName, 'Canva');
+  assert.equal(meta.description, 'Canva makes design amazingly simple & fun for everyone.');
+  assert.equal(meta.keywords, 'design tool, graphic design, templates');
+  assert.ok(meta.text.includes('Welcome to Canva'));
+  assert.ok(!meta.text.includes('console.log'));
+});
+
+test('ruleExtractSiteInfo：无 AI 时的规则推断与干净降级', async () => {
+  const { ruleExtractSiteInfo } = await import('../extension/lib/util.js');
+  const res1 = ruleExtractSiteInfo({
+    url: 'https://www.canva.com/',
+    title: 'Visual Suite for Everyone | Canva',
+    siteName: 'Canva',
+    description: 'Design presentations, social media graphics and more.',
+    keywords: 'design tool, presentation maker',
+  });
+  assert.equal(res1.name, 'Canva');
+  assert.equal(res1.targetUrl, 'https://www.canva.com/');
+  assert.equal(res1.siteIntro, 'Design presentations, social media graphics and more.');
+  assert.equal(res1.mainKeyword, 'design tool');
+
+  // 当无 siteName 时根据标题切分提取品牌名
+  const res2 = ruleExtractSiteInfo({
+    url: 'https://sprunki-game.io',
+    title: 'Play Sprunki Incredibox Game Online - Sprunki Game',
+    description: '',
+    keywords: '',
+    text: 'Sprunki is an interactive music mixing mod.',
+  });
+  assert.equal(res2.name, 'Sprunki Game');
+  assert.equal(res2.siteIntro, 'Sprunki is an interactive music mixing mod.');
+  assert.ok(res2.mainKeyword.length > 0);
+});
+

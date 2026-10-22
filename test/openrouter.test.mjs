@@ -202,3 +202,25 @@ test('buildCommentWithLink：占位符替换、href 右引号前换行、无占�
   const emptyAnchor = buildCommentWithLink('a {{LINK:}} b', 'https://s.com/', 'kw');
   assert.ok(emptyAnchor.includes('>kw</a>'), '空占位符应回退主关键词');
 });
+
+test('extractSiteInfoAI：提炼任务名称、网站介绍与主关键词', async () => {
+  const { extractSiteInfoAI } = await import('../extension/lib/openrouter.js');
+  getState().settings.openrouterKey = 'test-key';
+  stubFetch(JSON.stringify({
+    name: 'Canva',
+    siteIntro: 'Canva 是一个在线平面设计平台，支持拖拽创建演示文稿与海报。',
+    mainKeyword: '在线设计工具',
+  }));
+  const res = await extractSiteInfoAI({
+    url: 'https://www.canva.com/',
+    title: 'Visual Suite | Canva',
+    siteName: 'Canva',
+    description: 'Design presentations, graphics and more.',
+    keywords: 'design tool',
+    text: 'Canva is an easy to use graphic design platform.',
+  });
+  assert.equal(res.name, 'Canva');
+  assert.equal(res.siteIntro, 'Canva 是一个在线平面设计平台，支持拖拽创建演示文稿与海报。');
+  assert.equal(res.mainKeyword, '在线设计工具');
+});
+
