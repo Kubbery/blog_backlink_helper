@@ -26,32 +26,33 @@
 extension/
 ├── manifest.json            # MV3 清单
 ├── background/
-│   ├── service-worker.js    # 消息路由（switch on msg.type）、状态快照广播、alarms 保活、断点续跑
-│   ├── collect.js           # CollectController：DOM 抓取外链 → 翻页 → 「开始分析」逐条访问 + 规则判定入库（不经 AI）
-│   └── publish.js           # PublishAssistant：助手页步骤对当前激活标签页执行（识别/生成/填表/提交），「换一个」挑未发布资源
+│   ├── service-worker.js    # 消息路由（switch on msg.type）、状态快照广播、alarms 保活、断点续跑、Spam 接口中转
+│   ├── collect.js           # CollectController：DOM 抓取外链 → 翻页 → 「开始分析」逐条访问 + 规则判定入库（不经 AI）+ 评论区站长挖掘
+│   ├── publish.js           # PublishAssistant：助手页步骤对当前激活标签页执行（识别/生成/填表/提交），「换一个」挑未发布资源（频控与横向优先）
+│   └── verify.js            # VerifyController：T+10 分钟回访验证（dofollow/nofollow/待审核/失效死链拉黑与联动停用）
 ├── content/                 # 由 background 用 scripting 注入，不走 manifest content_scripts
 │   ├── analyzer.js          # window.__BCM_ANALYZE__：采集标题/正文/评论表单/评论区信息
 │   └── publisher.js         # window.__BCM_PUB__：无 UI 页面操作 detect/fill/submit/cleanup/markForm/locateLink（IIFE，非 ESM）；全框架注入（评论框可能在 iframe 里），不再向页面注入任何浮层 DOM
 ├── lib/
 │   ├── config.js            # ★ 所有「待联调」的选择器、URL 模板、默认值集中在这里，联调只改这个文件
 │   ├── storage.js           # chrome.storage.local 内存镜像 + 日志操作 + 旧数据迁移（资源数据全在 IDB）
-│   ├── idb.js               # IndexedDB 轻量封装（库 bcm-idb v3，stores: backlinks / analysis / published / templates）
+│   ├── idb.js               # IndexedDB 轻量封装（库 bcm-idb v4，stores: backlinks / analysis / published / templates / seeds / blacklist）
 │   ├── openrouter.js        # OpenRouter 客户端 + 四个 AI 角色（classify/formDetect/commentGen/discover）
 │   ├── i18n.js              # 中/英字典（MESSAGES）+ applyI18n
-│   └── util.js              # URL 处理、CSV（带 BOM）、tab 等待等纯函数
+│   └── util.js              # URL 处理、CSV（带 BOM）、tab 等待、extractCommenterDomains 等纯函数
 ├── sidepanel/               # 侧边栏主界面（panel.html/css/js）：收集/助手/日志/资源库四 Tab，点工具栏图标打开；「助手」Tab 是发布主操作台
 ├── options/                 # 设置页：API Key / 四模型 / 发布身份 / 语言 / 标题与摘要语言 / AI 超时
 └── _locales/                # 仅扩展名称与描述（zh_CN / en）
-docs/                        # 设计文档（插件界面描述.md）
+docs/                        # 设计文档（插件界面描述.md、补充20261020.md）
 test/                        # Node 自带 node:test 单测（见下）
 ```
 
 ## 架构要点（改代码前必读）
 
 - **持久化分两层**：
-  - `chrome.storage.local`（key `bcm_store`）存小状态：settings / collectState / assistantTask / publishRuntime / lastPublish / logs。`lib/storage.js` 的 `state` 是它的内存镜像，**变更后必须 `save(...keys)`**；`save` 是合并写入（先 get 再展开），不要绕过它直接写 storage。旧版的任务队列（`tasks` / `activeTaskId`）已随「发布」Tab 移除，`load()` 里有一次性清理。
-  - **IndexedDB（`bcm-idb` v3）是大数据表的唯一持久层**，不进 chrome.storage、不进内存态：`backlinks`（主键 `[targetDomain, url]`）、`analysis`（同主键；命中结论 ready/captcha 的记录即「可用资源」，含 `enabled` 启停标记，默认启用）、`published`（已发过的外链，主键 `[url, targetUrl]`，Submit 成功时写入——不要求页面在资源库中，手动打开的资源页同样落库；记录的 `targetDomain` 同行网站域名取助手页「定位同行网站」输入框的值，空则回落会话 refDomain；资源库「已发布」标记与「换一个」的筛选都按当前任务判定——published 表中存在 `[url, 当前任务目标地址]` 记录才算已发布，目标地址缺省回落到设置里的身份网址）、`templates`（「当前任务」模板，主键 `name`，助手页顶部可存/选/删，同名覆盖即编辑）。绑定页面时若同 `[url, targetUrl]` 已发布过会在助手页状态行提示。资源库 UI 直读 `analysis` 表，行内删除按钮（`deleteLibraryResource`）同时删 analysis 与 backlinks 记录（只删 analysis 的话该外链会回到「队列中」，下次分析重跑回库），published 发布历史保留；v1 的 `resources` 表已废弃（升级时已发布记录自动迁入 `published` 后删表），旧版 chrome.storage 双写的 backlinks 由 `storage.js` 里的一次性迁移函数搬到 IDB。
-- **MV3 service worker 随时被回收**：所有状态落盘后才能丢；`chrome.alarms`（`bcm-tick`，30 秒）负责唤醒续跑收集队列，并把回收途中卡住的 `stopping` 状态收尾为 `idle`；`onInstalled`/`onStartup` 做断点续跑。发布无后台循环，回收不影响——publishRuntime（助手会话）落盘后重开面板照样续上。
+  - `chrome.storage.local`（key `bcm_store`）存小状态：settings / collectState / assistantTask / publishRuntime / lastPublish / logs / formIndex。`lib/storage.js` 的 `state` 是它的内存镜像，**变更后必须 `save(...keys)`**；`save` 是合并写入（先 get 再展开），不要绕过它直接写 storage。旧版的任务队列（`tasks` / `activeTaskId`）已随「发布」Tab 移除，`load()` 里有一次性清理。
+  - **IndexedDB（`bcm-idb` v4）是大数据表的唯一持久层**，不进 chrome.storage、不进内存态：`backlinks`（主键 `[targetDomain, url]`）、`analysis`（同主键；命中结论 ready/captcha 的记录即「可用资源」，含 `enabled` 启停标记，默认启用）、`published`（已发过的外链，主键 `[url, targetUrl]`，Submit 成功时写入——含 `verifyStage`、`rel` 等验证数据）、`templates`（「当前任务」模板，主键 `name`，助手页顶部可存/选/删，同名覆盖即编辑）、`seeds`（滚雪球挖掘站长域名，主键 `domain`，含 `status: 'new' | 'used'`）、`blacklist`（垃圾与失效域名，主键 `domain`，命中域名自动停用资源）。绑定页面时若同 `[url, targetUrl]` 已发布过会在助手页状态行提示。资源库 UI 直读 `analysis` 表，行内删除按钮（`deleteLibraryResource`）同时删 analysis 与 backlinks 记录，published 发布历史保留；v1 的 `resources` 表已废弃，旧版 chrome.storage 双写的 backlinks 由 `storage.js` 里的一次性迁移函数搬到 IDB。
+- **MV3 service worker 随时被回收**：所有状态落盘后才能丢；`chrome.alarms`（`bcm-tick`，30 秒）负责唤醒续跑收集队列，并处理 T+10 分钟回访报警（`verify:*`），把回收途中卡住的 `stopping` 状态收尾为 `idle`；`onInstalled`/`onStartup` 做断点续跑。发布无后台循环，回收不影响——publishRuntime（助手会话）落盘后重开面板照样续上。
 - **UI ↔ 后台通信**：sidepanel 用 `sendMessage` RPC（`getSnapshot`、`startCollect`、`setAssistantTask`、`setSettings` 等；助手页交互 `pub:step`/`pub:decision`/`pickNextResource` 也来自 sidepanel 的「助手」Tab）；**「定位同行网站」例外**：它是只读视觉辅助，由面板直接向当前标签页主框架注入 publisher.js 执行 `locateLink`（不经后台，避免 SW 回收丢响应把按钮卡死在「正在定位」，带 `LIMITS.locateTimeoutMs` 超时兜底；域名为空时面板直查 IDB analysis 表按 URL 取同行域名，与后台 bind 口径一致）。后台状态推送走 `chrome.runtime.sendMessage` 单向广播（`stateChanged` 快照），**不用 port 长连接**——无连接状态，SW 回收重启后新实例照样送达，面板关着时静默丢弃、打开时由 `init()` 的 `getSnapshot` 追平。**设置的唯一写入口是 `setSettings` 消息**，options 页也不得直接写 storage（会被后台内存态覆盖）。
 - **助手页（发布主操作台）**：操作对象 = 浏览器当前激活的标签页（面板用 `chrome.tabs.query` + onActivated/onUpdated 跟踪，仅 http/https 可注入）。顶部「当前任务」配置区（`assistantTask`，字段失焦即存；模板下拉选择即填充并保存），下方步骤按钮/字段复制/定位同行网站/换一个/Submit/Skip 全部作用于当前标签页。后台 `PublishAssistant` 收到步骤时取激活 tab，`publishRuntime.resourceUrl` 与该 tab URL 不一致则重新绑定（全框架注入 + 纯规则页面检测：验证码/登录/表单，只提示不阻断）；面板按快照 `publish.resourceUrl` 与当前标签页一致才算「绑定」——字段区仅绑定时展示、Submit/Skip 仅绑定且 `stage === 'awaiting_review'` 解锁、「自动填写表单」需 `manual.comment` 已生成。Submit 成功写 published 表并作废已提交评论（强制重新生成防误重复提交）；页面不在资源库时同时补录进 analysis 表当资源（ready，按同行域名归档，同 url 已有记录或缺同行域名则跳过），同时把这次发布记进 `lastPublish`（url/目标地址/任务名/时间/备注）；「将当前资源添加到资源库」按钮（`pub:addResource`）不经过发布流程、按同口径手动补录当前标签页——同行域名取「定位同行网站」右侧输入框的值（必填，空则拒绝），同 url 已在资源库则拒绝重复添加；「标注为已发过」按钮（`pub:markPublished`）不经提交流程，直接往 published 表补一条记录（主键 [当前标签页 url, 当前任务目标地址]，同行域名取输入框、空则回落会话 refDomain，同主键已有记录或目标地址为空则拒绝）；助手页底部「备注」按钮就是给 `lastPublish` 打标记（如「有审核」「失败」），**与当前标签页解耦**——提交后随时可改，并尽力同步 published 表的 comment 字段；「换一个」（`pickNextResource`）把当前标签页导航到资源库未发布过的下一条资源（ready 优先于 captcha，同档按命中时间新→旧）。步骤按钮看门狗在面板侧：`aiTimeoutMs * 3 + 30000` 未回包提示可重试。
 - **收集统计口径**：四项统计均为跨轮次累积口径——空闲时（`getSnapshot` 触发，3 秒去抖）从 IndexedDB 重新计算：已发现=backlinks 条数、已分析=analysis 条数、队列中=backlinks 里未分析的、博客评论资源=analysis 中 ready/captcha 条数（与资源库筛选一致）（见 `service-worker.js` 的 `refreshCollectStatsFromIdb`）；「开始收集/开始分析」也从同一基线起算，分析运行中每处理完一条即调 `syncStatsFromIdb` 从 IndexedDB 重新对账四项统计（不增量累加，显示值恒等于表口径）；收集模式下「队列中」随抓取新入档逐条 +1。

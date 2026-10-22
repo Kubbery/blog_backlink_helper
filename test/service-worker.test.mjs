@@ -235,3 +235,17 @@ test('deleteLibraryResource：缺少 URL 拒绝', async () => {
   const res = await sendMsg({ type: 'deleteLibraryResource', targetDomain: 'example.com', url: '' });
   assert.equal(res.ok, false);
 });
+
+test('setSettings：保存 autoSpamClean 与 spamCleanIntervalHours 并随快照下发', async () => {
+  const res = await sendMsg({
+    type: 'setSettings',
+    patch: {
+      autoSpamClean: true,
+      spamCleanIntervalHours: 48,
+    },
+  });
+  assert.equal(res.ok, true);
+  assert.equal(res.snapshot.settings.autoSpamClean, true);
+  assert.equal(res.snapshot.settings.spamCleanIntervalHours, 48);
+});
+

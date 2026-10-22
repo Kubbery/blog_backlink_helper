@@ -60,7 +60,10 @@
           <div class="stat"><div class="num" id="st-queued">0</div><div class="lbl" data-i18n="stat_queued">队列中</div></div>
           <div class="stat"><div class="num green" id="st-matched">0</div><div class="lbl" data-i18n="stat_matched">博客评论资源</div></div>
         </div>
-        <div class="seed-line" id="collect-seeds" hidden></div>
+        <div class="seed-line" id="collect-seeds" hidden>
+          <span id="seeds-info"></span>
+          <button id="btn-continue-seed" class="btn btn-ghost btn-sm" style="margin-left:auto" data-i18n="continueFromSeed">从种子继续</button>
+        </div>
         <div class="hint-line" data-i18n="matchedHint">命中的博客评论资源已存入「资源库」Tab</div>
       </div>
     </section>
@@ -119,6 +122,7 @@
           <span class="dot" id="asst-dot"></span>
           <span id="asst-status"></span>
         </div>
+        <div id="asst-freq-warn" class="asst-freq-warn" hidden></div>
         <div class="asst-steps">
           <button class="btn btn-sm asst-step" data-step="summarize" data-i18n="stepSummarize">获取标题与摘要</button>
           <button class="btn btn-sm asst-step" data-step="genComment" data-i18n="stepGen">AI 生成评论</button>
@@ -168,6 +172,10 @@
 
     <!-- ===== 资源库 ===== -->
     <section id="view-library" class="view">
+      <div class="lib-toolbar" style="display:flex;gap:8px;margin-bottom:8px">
+        <button id="btn-spam-clean" class="btn btn-outline btn-sm" style="flex:1" data-i18n="spamClean" data-i18n-title="spamCleanTitle">外链 Spam 清洗</button>
+        <button id="btn-blacklist-manage" class="btn btn-ghost btn-sm" data-i18n="blacklistModalTitle">黑名单</button>
+      </div>
       <div class="chips" id="type-chips">
         <button class="chip active" data-type="all" data-i18n="filterAll">全部</button>
         <button class="chip" data-type="blog_comment" data-i18n="type_blog_comment">博客评论</button>
@@ -202,6 +210,18 @@
       <option value="en">English</option>
     </select>
   </footer>
+
+  <!-- 通用弹窗组件 -->
+  <div id="modal-overlay" class="modal-overlay" hidden>
+    <div class="modal-card">
+      <div class="modal-head">
+        <span class="modal-title" id="modal-title"></span>
+        <button class="modal-close" id="modal-close">✕</button>
+      </div>
+      <div class="modal-body" id="modal-body"></div>
+      <div class="modal-foot" id="modal-foot"></div>
+    </div>
+  </div>
 
   <div id="toast" hidden></div>
 

@@ -89,6 +89,27 @@
       </div>
     </section>
 
+    <!-- 卡片五：Spam 定期清洗与黑名单 -->
+    <section class="card">
+      <h2 data-i18n="autoSpamCleanCardTitle">定期清洗与黑名单</h2>
+      <p class="desc" data-i18n="autoSpamCleanDesc"></p>
+      <div class="row" style="align-items: center; gap: 16px;">
+        <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13.5px; user-select: none;">
+          <input type="checkbox" id="auto-spam-clean" style="width: auto; cursor: pointer;" />
+          <span data-i18n="autoSpamCleanLabel">自动定时清洗 Spam 外链</span>
+        </label>
+        <div class="form-row" style="margin: 0; min-width: 140px;">
+          <label data-i18n="spamCleanIntervalLabel">清洗间隔（小时）</label>
+          <input type="number" id="spam-clean-interval" min="1" max="168" step="1" />
+        </div>
+      </div>
+      <div class="row" style="margin-top: 14px; align-items: center; justify-content: space-between;">
+        <div class="hint" id="last-spam-clean" style="margin: 0;"></div>
+        <button id="btn-run-spam-clean" class="btn btn-primary" data-i18n="runSpamCleanNow">立即执行全库清洗</button>
+      </div>
+      <div class="hint" id="spam-clean-result" style="margin-top: 8px;"></div>
+    </section>
+
     <div id="saved-flash" data-i18n="saved">已保存</div>
   </div>
 

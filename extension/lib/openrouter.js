@@ -158,11 +158,14 @@ export async function summarizeArticle({ title, text, lang = 'zh' }) {
 }
 
 /** 评论身份：根据文章内容生成不起眼的读者昵称与邮箱 */
-export async function generateIdentity({ title, text }) {
+export async function generateIdentity({ title, text, ownerDomain = '' }) {
+  const emailInstruction = ownerDomain
+    ? `email：必须使用 ${ownerDomain} 这个域名下的邮箱（形如 name@${ownerDomain}），用户名部分像真人名；禁止 gmail/outlook/yahoo 等免费邮箱。`
+    : 'email：与之匹配的邮箱，使用常见免费邮箱域名（gmail.com / outlook.com / yahoo.com 等），用户名部分像真人。';
   const system = [
     '为一条博客评论生成一个真实感的读者身份。',
     'name：普通的英文昵称/人名（不要名人、不要关键词堆砌）。',
-    'email：与之匹配的邮箱，使用常见免费邮箱域名（gmail.com / outlook.com / yahoo.com 等），用户名部分像真人。',
+    emailInstruction,
     '只输出 JSON：{"name":"...","email":"..."}',
   ].join('\n');
   const user = `文章标题: ${title || '(无)'}\n文章摘要:\n${(text || '').slice(0, 800)}`;
@@ -175,7 +178,7 @@ export async function generateIdentity({ title, text }) {
 
 /**
  * 把占位符替换成 <a> 链接：href 的右引号前插入换行（<a href="url\n">锚文本</a>）。
- * 没有占位符时链接追加到正文末尾；锚文本兜底用主关键词。
+ * 没有占位符时链接追加到正文末尾；锚文本兜底用品牌名或主关键词。
  */
 export function buildCommentWithLink(text, targetUrl, fallbackAnchor) {
   const link = (anchor) => `<a href="${targetUrl}\n">${anchor}</a>`;
@@ -189,12 +192,16 @@ export function buildCommentWithLink(text, targetUrl, fallbackAnchor) {
 }
 
 /**
- * 评论生成：自然相关评论（语言跟随文章）+ 正文内嵌主关键词变体锚链接（website 字段留空，链接只走正文）。
- * 入参 title/text 是 AI 生成的标题与摘要，articleLang 是识别出的文章语言（提示词里显式指定评论语言）。
- * 链接是硬性要求（不带链接的评论对本工具无效）：模型未输出 {{LINK:}} 占位符时加强措辞重试一次，
- * 仍无占位符则抛错——全自动记失败并保留标签页，半自动助手页报错可重新生成。
+ * 评论生成：自然相关评论（语言跟随文章）+ 品牌名/裸URL锚链接。
+ * 锚文本只允许品牌名或裸 URL（任何商业修饰短语都是垃圾外链的典型指纹）。
+ * 入参 title/text 是 AI 生成的标题与摘要，articleLang 是识别出的文章语言。
  */
 export async function generateComment({ url, title, text }, { targetUrl, siteIntro = '', mainKeyword = '', articleLang = '' } = {}) {
+  // 锚文本只能是品牌名或裸 URL
+  const brand = (() => {
+    try { return new URL(targetUrl).hostname.replace(/^www\./, ''); } catch { return targetUrl || ''; }
+  })();
+
   const system = [
     '你是一位真实的博客读者，要给一篇博客文章写一条自然、相关、有观点的评论。',
     articleLang
@@ -210,8 +217,9 @@ export async function generateComment({ url, title, text }, { targetUrl, siteInt
       '禁止生硬插入：不要在无关句子的句尾甩链接，不要用 "顺便推荐一个网站" 这类突兀话术。',
       '占位符绝不能省略：找不到直接交集时，就写使用这类产品/服务的通用真实体验，把链接嵌进那句里；',
       '哪怕只是使用场景相似也要自然带出——不带链接的评论是无效评论。',
-      `锚文本要求：基于我的主关键词「${mainKeyword || siteIntro || targetUrl}」做变体——可加相关前缀/后缀、同义词或长尾组合`,
-      '（例如 "best X"、"X for beginners"、"cheap X alternatives"），不要每次都用一模一样的裸关键词；锚文本要与所在句子的语义连贯。',
+      `锚文本要求（硬性）：锚文本只能是网站品牌名或裸 URL，即「${brand}」或「${targetUrl}」。`,
+      '禁止使用任何带商业修饰词的关键词短语（best X / X for beginners / cheap X alternatives / top 10 X 等），',
+      '也禁止把主关键词原样当锚文本。锚文本要与所在句子语义连贯，像真人在提一个他常用的网站。',
       `我的网站：${targetUrl}${siteIntro ? `\n网站介绍：${siteIntro}` : ''}`,
     ].join('\n') : '不要在评论里放任何链接，也不要输出占位符。',
   ].join('\n');
@@ -229,10 +237,10 @@ export async function generateComment({ url, title, text }, { targetUrl, siteInt
 
   const first = (await call()).trim();
   if (!targetUrl) return first.replace(/\s*\{\{LINK:[^}]+\}\}/g, '');
-  if (/\{\{LINK:[^}]*\}\}/.test(first)) return buildCommentWithLink(first, targetUrl, mainKeyword || 'this website');
+  if (/\{\{LINK:[^}]*\}\}/.test(first)) return buildCommentWithLink(first, targetUrl, brand);
   // 不带链接的评论对本工具是无效评论：加强措辞重试一次，仍无占位符则报错（上层记失败/助手页可重试）
   const retry = (await call('注意：上一次输出没有包含 {{LINK:锚文本}} 占位符，这次必须包含且仅一次——从摘要里找与我网站主题最接近的点自然带出。')).trim();
-  if (/\{\{LINK:[^}]*\}\}/.test(retry)) return buildCommentWithLink(retry, targetUrl, mainKeyword || 'this website');
+  if (/\{\{LINK:[^}]*\}\}/.test(retry)) return buildCommentWithLink(retry, targetUrl, brand);
   throw new Error('评论未带链接：AI 两次输出都未包含链接占位符');
 }
 

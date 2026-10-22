@@ -27,6 +27,14 @@ export const DEFAULT_SETTINGS = {
   pageDelayMaxMs: 9000,    // 收集翻页最大间隔（实际取区间内随机值）
   minAscore: 25,           // 收集筛选：页面 AS 低于该值的行不入库（收集 Tab 可配置）
   logEnabled: true,        // 日志开关：关闭时 addLog 直接丢弃日志
+  dailyPerDomain: 1,        // 频控：同一域名每天最多发布 1 条
+  weeklyPerDomain: 2,       // 频控：同一域名 7 天内最多发布 2 条
+  minHoursBetweenDomains: 0.5, // 换域名之间的最小间隔（小时）
+  skipOnCaptcha: true,      // 助手换一个时遇到验证码资源直接跳过
+  requireIndexed: true,     // 页面未被收录则不建议发布
+  autoSpamClean: true,      // 是否开启后台定期自动清洗 Spam 外链
+  spamCleanIntervalHours: 24, // 定期清洗间隔（小时，默认 24 小时）
+  lastSpamCleanAt: 0,       // 上次自动清洗时间戳
 };
 
 export const LIMITS = {

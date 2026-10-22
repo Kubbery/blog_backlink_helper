@@ -106,6 +106,36 @@ export function extractCommenterSites(html, pageHost = '') {
   return [...out].slice(0, 50);
 }
 
+const DEFAULT_IGNORED_DOMAINS = new Set([
+  'wordpress.org', 'wordpress.com', 'w.org', 'gravatar.com', 'automattic.com',
+  'twitter.com', 'x.com', 'facebook.com', 'instagram.com', 'youtube.com',
+  'linkedin.com', 'github.com', 'pinterest.com', 'reddit.com', 't.me',
+  'telegram.org', 'tiktok.com', 'google.com', 'apple.com', 'microsoft.com',
+  'schema.org', 'w3.org', 'cloudflare.com', 'mozilla.org',
+]);
+
+/** 从评论区 HTML 提取评论者留下的外链域名——这些就是同行站长，全是已验证可发的资源 */
+export function extractCommenterDomains(commentHtml, { selfHost = '', currentDomain = '', excludeHosts = [] } = {}) {
+  const out = new Set();
+  const re = /<a\b[^>]*href=["']([^"']+)["']/gi;
+  let m;
+  const normSelf = (selfHost || currentDomain || '').toLowerCase().replace(/^www\./, '');
+  const customExcludes = new Set((excludeHosts || []).map((e) => (e || '').toLowerCase().replace(/^www\./, '')));
+  while ((m = re.exec(String(commentHtml || '')))) {
+    try {
+      const raw = m[1];
+      const h = new URL(raw, 'https://x.invalid').hostname.replace(/^www\./, '').toLowerCase();
+      if (!h || h === 'x.invalid') continue;
+      if (normSelf && (h === normSelf || h.endsWith('.' + normSelf))) continue;
+      if (DEFAULT_IGNORED_DOMAINS.has(h) || [...DEFAULT_IGNORED_DOMAINS].some((d) => h.endsWith('.' + d))) continue;
+      if (customExcludes.has(h) || [...customExcludes].some((e) => e && (h === e || h.endsWith('.' + e)))) continue;
+      if (/\/(wp-|feed|comments|category|tag|author)\//i.test(raw)) continue;
+      out.add(h);
+    } catch { /* 相对链接，跳过 */ }
+  }
+  return [...out];
+}
+
 /** 资源列表 → CSV（带 BOM，Excel 友好） */
 export function toCSV(resources) {
   const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;

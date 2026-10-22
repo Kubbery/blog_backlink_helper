@@ -32,6 +32,8 @@ function saveSettings() {
           language: settings.language,
           summaryLang: settings.summaryLang,
           aiTimeoutMs: settings.aiTimeoutMs,
+          autoSpamClean: settings.autoSpamClean,
+          spamCleanIntervalHours: settings.spamCleanIntervalHours,
         },
       });
       flash.classList.add('show');
@@ -116,6 +118,53 @@ async function init() {
     setLanguage(settings.language);
     applyI18n();
     saveSettings(); // setSettings 已包含 language，无需重复发消息
+  });
+
+  // Spam 定期清洗设置
+  const autoCleanEl = $('#auto-spam-clean');
+  autoCleanEl.checked = settings.autoSpamClean !== false;
+  autoCleanEl.addEventListener('change', () => {
+    settings.autoSpamClean = autoCleanEl.checked;
+    saveSettings();
+  });
+
+  const intervalEl = $('#spam-clean-interval');
+  intervalEl.value = settings.spamCleanIntervalHours || 24;
+  intervalEl.addEventListener('change', () => {
+    settings.spamCleanIntervalHours = Math.max(1, Math.round(Number(intervalEl.value) || 24));
+    saveSettings();
+  });
+
+  const updateLastCleanTime = (ts) => {
+    const el = $('#last-spam-clean');
+    if (!el) return;
+    const timeStr = ts ? new Date(ts).toLocaleString() : t('neverRun');
+    el.textContent = `${t('lastSpamCleanLabel')}: ${timeStr}`;
+  };
+  updateLastCleanTime(settings.lastSpamCleanAt);
+
+  const btnRunClean = $('#btn-run-spam-clean');
+  const cleanResult = $('#spam-clean-result');
+  btnRunClean.addEventListener('click', async () => {
+    btnRunClean.disabled = true;
+    cleanResult.textContent = '...';
+    cleanResult.className = 'hint';
+    try {
+      const res = await chrome.runtime.sendMessage({ type: 'spam:runPeriodic' });
+      if (res && res.ok) {
+        cleanResult.textContent = `✓ 完成：检测 ${res.total} 个域名，发现垃圾 ${res.spamCount} 个，停用 ${res.disabledCount || 0} 条资源`;
+        cleanResult.className = 'hint ok';
+        updateLastCleanTime(Date.now());
+      } else {
+        cleanResult.textContent = `✗ 失败：${res?.error || res?.reason || '未知错误'}`;
+        cleanResult.className = 'hint err';
+      }
+    } catch (e) {
+      cleanResult.textContent = `✗ 错误：${e.message}`;
+      cleanResult.className = 'hint err';
+    } finally {
+      btnRunClean.disabled = false;
+    }
   });
 }
 

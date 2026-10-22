@@ -128,6 +128,25 @@ export class PublishAssistant {
     const cfg = this.taskConfig();
     if (cfg.targetUrl && await idbGet('published', [tab.url, cfg.targetUrl]).catch(() => null)) {
       rt.uiStatus = { key: 'asstAlreadyPublished' };
+    } else {
+      // 频控检查与提示（每日同域名上限）
+      const tabHost = (() => {
+        try { return new URL(tab.url).hostname.replace(/^www\./, '').toLowerCase(); } catch { return ''; }
+      })();
+      if (tabHost) {
+        const pubRows = await idbGetAll('published').catch(() => []);
+        const oneDayAgo = Date.now() - 24 * 3600 * 1000;
+        const sameDomainToday = pubRows.filter((p) => {
+          if (!p || !p.url) return false;
+          const d = (() => { try { return new URL(p.url).hostname.replace(/^www\./, '').toLowerCase(); } catch { return ''; } })();
+          const ts = typeof p.publishedAt === 'number' ? p.publishedAt : new Date(p.publishedAt).getTime();
+          return d === tabHost && ts >= oneDayAgo;
+        });
+        const limit = st.settings.dailyPerDomain || 1;
+        if (sameDomainToday.length >= limit) {
+          rt.uiStatus = { text: `提示：域名「${tabHost}」今日已发布 ${sameDomainToday.length} 次（建议单日 ≤${limit}，优先发布新域名）` };
+        }
+      }
     }
     await this.notify(['publishRuntime', 'logs']);
     return rt;
@@ -138,9 +157,18 @@ export class PublishAssistant {
    * 不要求 url 在资源库（analysis 表）中——手动打开的资源页同样落库；
    * targetDomain = 同行网站域名（面板「定位同行网站」输入框的值，空则回落会话 refDomain）。
    */
-  async markPublished(url, targetUrl, taskName, targetDomain) {
+  async markPublished(url, targetUrl, taskName, targetDomain, linkChannel) {
     try {
-      await idbPut('published', { url, targetUrl, targetDomain: targetDomain || '', taskName: taskName || '', publishedAt: fmtDateTime() });
+      await idbPut('published', {
+        url, targetUrl,
+        targetDomain: targetDomain || '',
+        taskName: taskName || '',
+        publishedAt: fmtDateTime(),
+        // 回访字段：T+10 分钟后由 verify.js 自动检查评论是否渲染、链接 rel 是什么
+        verifyAt: Date.now() + 10 * 60 * 1000,
+        verifyStage: 'pending',
+        linkChannel: linkChannel || '',
+      });
     } catch (e) {
       addLog('publish', `published 表写入失败：${e.message}`, 'warn', url);
     }
@@ -275,13 +303,33 @@ export class PublishAssistant {
         // 重新采集页面表单候选（跨框架，标题/摘要一并刷新）；表单可能在 iframe 里，记住 frameId
         const d = await this.detectAll(tab.id).catch(() => null);
         const frameId = (d && d.forms.length && d.forms[0].frameId) || 0;
-        // 允许识别失败：表单留空也继续走「生成评论」，评论会展示在助手页上，可手动复制粘贴
+        const pageHost = (() => {
+          try { return new URL(url).hostname.replace(/^www\./, '').toLowerCase(); } catch { return ''; }
+        })();
+
+        // 表单指纹缓存：同站点第二次遇到直接复用选择器，跳过 AI 调用
         let form = null;
-        if (d && d.ok && d.forms.length) {
+        const cached = pageHost && st.formIndex && st.formIndex[pageHost];
+        if (cached && cached.selectors && cached.selectors.comment) {
+          form = cached.selectors;
+          cached.hits = (cached.hits || 0) + 1;
+          await save('formIndex');
+          addLog('publish', `命中表单指纹缓存，跳过 AI 识别（${pageHost}，累计命中 ${cached.hits} 次）`, 'info', url);
+        } else if (d && d.ok && d.forms.length) {
           try {
             form = await detectForm({ formHtml: d.forms[0].html, pageUrl: url });
             if (!form || !form.comment) throw new Error('未识别到评论文本框');
             addLog('ai', `表单识别成功${frameId ? '（在 iframe 中）' : ''}（留链方式：${form.linkMethod || 'website_field'}）`, 'success', url);
+            if (pageHost) {
+              st.formIndex = st.formIndex || {};
+              st.formIndex[pageHost] = {
+                linkMethod: form.linkMethod || 'website_field',
+                selectors: form,
+                hits: 1,
+                savedAt: Date.now(),
+              };
+              await save('formIndex');
+            }
           } catch (e) {
             addLog('ai', `表单识别失败，使用默认选择器兜底：${e.message}`, 'warn', url);
             form = defaultForm();
@@ -312,14 +360,22 @@ export class PublishAssistant {
         );
         addLog('ai', comment.includes('<a') ? '评论生成完成（正文内嵌链接）' : '评论生成完成', 'success', url);
         let identity;
+        // 从设置里的身份邮箱取 @ 后面的域名，传给 AI 生成同域名邮箱（假邮箱被站点验证就废，且收不到评论通知）
+        const ownerDomain = (() => {
+          const em = st.settings.identity.email || '';
+          const at = em.indexOf('@');
+          return at > 0 ? em.slice(at + 1) : '';
+        })();
         try {
-          identity = await generateIdentity({ title: art.title, text: art.summary });
+          identity = await generateIdentity({ title: art.title, text: art.summary, ownerDomain });
           addLog('ai', `身份生成：${identity.name} <${identity.email}>`, 'info', url);
         } catch (e) {
           addLog('ai', `身份生成失败，使用设置里的默认身份：${e.message}`, 'warn', url);
           identity = { name: st.settings.identity.name, email: st.settings.identity.email };
         }
-        identity.website = ''; // 网址字段留空，链接只通过评论正文的 <a> 传递
+        // 独立网址框才是可靠留链通道：WordPress 对新访客的评论正文会做 HTML 过滤，<a> 多数被剥掉。
+        // 是否真的填、正文要不要剥链接，由 publisher.js 的 fill() 按表单结构决定。
+        identity.website = cfg.targetUrl || '';
         // 评论译文：仅展示给用户看（评论语言跟随文章，用户未必读得懂），不参与填表；
         // 文章语言与阅读语言一致时跳过；翻译失败不影响主流程
         let translation = '';
@@ -346,6 +402,7 @@ export class PublishAssistant {
         // fill 成功后进入待确认阶段：面板按 stage === 'awaiting_review' 解锁 Submit / Skip
         rt.stage = 'awaiting_review';
         rt.uiStatus = { key: 'asstReady' };
+        rt.manual = { ...m, linkChannel: f.linkChannel || '' };
       }
       await this.notify(['publishRuntime', 'logs']);
       return { ok: true };
@@ -390,7 +447,7 @@ export class PublishAssistant {
         if (s && s.ok) {
           submitted = true;
           const refDomain = (domain || '').trim() || rt.refDomain || '';
-          await this.markPublished(rt.resourceUrl, cfg.targetUrl, cfg.name, refDomain);
+          await this.markPublished(rt.resourceUrl, cfg.targetUrl, cfg.name, refDomain, rt.manual && rt.manual.linkChannel || '');
           // 页面不在资源库（手动打开的资源页）时补录为 ready 资源，之后资源库/「换一个」都能用上
           await this.ensureAnalysisResource(rt.resourceUrl, refDomain);
           // 记下「上次发布」：助手页备注按钮的标记对象（与当前标签页解耦，之后随时可改备注）
@@ -575,23 +632,86 @@ export class PublishAssistant {
   async pickNext() {
     const tab = await this.activeTab();
     if (!tab) return { ok: false, error: '当前标签页不可导航' };
-    const [analysis, published] = await Promise.all([
+    const [analysis, published, blacklist] = await Promise.all([
       idbGetAll('analysis').catch(() => []),
       idbGetAll('published').catch(() => []),
+      idbGetAll('blacklist').catch(() => []),
     ]);
     const target = this.taskConfig().targetUrl;
     const pubUrls = new Set(published.filter((r) => r && r.targetUrl === target).map((r) => r.url));
+    const blackSet = new Set(blacklist.map((b) => b.domain));
+    const settings = getState().settings || {};
+
+    const now = Date.now();
+    const oneDayAgo = now - 24 * 3600 * 1000;
+    const sevenDaysAgo = now - 7 * 24 * 3600 * 1000;
+
+    // 统计各博客域名的发布历史（频控与横向优先）
+    const domainPubStats = new Map();
+    for (const p of published) {
+      if (!p || !p.url) continue;
+      const d = (() => {
+        try { return new URL(p.url).hostname.replace(/^www\./, '').toLowerCase(); } catch { return ''; }
+      })();
+      if (!d) continue;
+      const stat = domainPubStats.get(d) || { totalPub: 0, dailyCount: 0, weeklyCount: 0 };
+      stat.totalPub++;
+      const pubTs = typeof p.publishedAt === 'number' ? p.publishedAt : new Date(p.publishedAt).getTime();
+      if (pubTs) {
+        if (pubTs >= oneDayAgo) stat.dailyCount++;
+        if (pubTs >= sevenDaysAgo) stat.weeklyCount++;
+      }
+      domainPubStats.set(d, stat);
+    }
+
     const seen = new Set();
     const candidates = analysis
-      .filter((r) => r && r.url && (r.status === 'ready' || r.status === 'captcha')
-        && r.enabled !== false && !pubUrls.has(r.url) && r.url !== tab.url)
+      .filter((r) => {
+        if (!r || !r.url || r.enabled === false) return false;
+        if (r.url === tab.url || pubUrls.has(r.url)) return false;
+        // 遇到验证码直接跳过（可由 settings.skipOnCaptcha 控制）
+        if (settings.skipOnCaptcha !== false && r.status === 'captcha') return false;
+        if (r.status !== 'ready' && r.status !== 'captcha') return false;
+
+        const host = (() => {
+          try { return new URL(r.url).hostname.replace(/^www\./, '').toLowerCase(); } catch { return ''; }
+        })();
+        // 黑名单过滤
+        if (blackSet.has(host)) return false;
+
+        // 频控过滤：单日上限与 7 天上限
+        const stat = domainPubStats.get(host);
+        if (stat) {
+          const dailyLimit = settings.dailyPerDomain ?? 1;
+          const weeklyLimit = settings.weeklyPerDomain ?? 2;
+          if (dailyLimit > 0 && stat.dailyCount >= dailyLimit) return false;
+          if (weeklyLimit > 0 && stat.weeklyCount >= weeklyLimit) return false;
+        }
+        return true;
+      })
       .filter((r) => !seen.has(r.url) && seen.add(r.url))
-      .sort((a, b) => ((a.status === 'ready' ? 0 : 1) - (b.status === 'ready' ? 0 : 1)) || ((b.checkedAt || 0) - (a.checkedAt || 0)));
-    if (!candidates.length) return { ok: false, error: '资源库中没有未发布过的资源了' };
+      .sort((a, b) => {
+        const da = (() => { try { return new URL(a.url).hostname.replace(/^www\./, '').toLowerCase(); } catch { return ''; } })();
+        const db = (() => { try { return new URL(b.url).hostname.replace(/^www\./, '').toLowerCase(); } catch { return ''; } })();
+        const statA = domainPubStats.get(da) || { totalPub: 0 };
+        const statB = domainPubStats.get(db) || { totalPub: 0 };
+
+        // 1. 横向优先：从未发布过的域名排在最前，发过较多的同域名降权
+        if (statA.totalPub !== statB.totalPub) {
+          return statA.totalPub - statB.totalPub;
+        }
+        // 2. 状态优先：ready 优于 captcha
+        const readyDiff = (a.status === 'ready' ? 0 : 1) - (b.status === 'ready' ? 0 : 1);
+        if (readyDiff !== 0) return readyDiff;
+        // 3. 时间优先：最新命中优先
+        return (b.checkedAt || 0) - (a.checkedAt || 0);
+      });
+
+    if (!candidates.length) return { ok: false, error: '资源库中没有符合频控条件的未发布资源了' };
     const url = candidates[0].url;
     this.pendingRef = { url, domain: candidates[0].targetDomain || '' };
     await chrome.tabs.update(tab.id, { url });
-    addLog('publish', '换一个：已在当前标签页打开下一条未发布资源', 'info', url);
+    addLog('publish', '换一个：已在当前标签页打开下一条未发布资源（横向优先排序）', 'info', url);
     await this.notify(['logs']);
     return { ok: true, url };
   }

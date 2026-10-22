@@ -121,9 +121,13 @@ function renderCollect() {
   $('#st-queued').textContent = c.queued;
 
   const seedEl = $('#collect-seeds');
-  if (c.seeds > 0) {
+  const totalSeeds = c.seeds || 0;
+  const unusedSeeds = c.newSeeds != null ? c.newSeeds : totalSeeds;
+  if (totalSeeds > 0) {
     seedEl.hidden = false;
-    seedEl.textContent = `❄ ${c.seeds} ${t('seedHint')}`;
+    $('#seeds-info').textContent = `❄ ${t('seedsLine', { total: totalSeeds, unused: unusedSeeds })}`;
+    const continueBtn = $('#btn-continue-seed');
+    if (continueBtn) continueBtn.disabled = busy || unusedSeeds === 0;
   } else {
     seedEl.hidden = true;
   }
@@ -207,12 +211,28 @@ function renderLibrary() {
       ${folded ? '' : rows.map((r) => {
         const fav = `<img class="fav" src="${chrome.runtime.getURL('/_favicon/?pageUrl=' + encodeURIComponent(r.url) + '&clientId=bcm')}" onerror="this.style.display='none'">`;
         const short = r.domain + (r.url.replace(/^https?:\/\/[^/]+/, '').length > 1 ? r.url.replace(/^https?:\/\/[^/]+/, '') : '');
+        let verifyBadge = '';
+        if (r.published) {
+          if (r.verifyStage === 'verified') {
+            const relClass = r.rel === 'dofollow' ? 'badge-dofollow' : 'badge-nofollow';
+            verifyBadge = `<span class="badge ${relClass}" title="${t('verifySuccess', { rel: r.rel || 'link' })}">${esc(r.rel || 'verified')}</span>`;
+          } else if (r.verifyStage === 'moderation') {
+            verifyBadge = `<span class="badge badge-moderation" title="${t('verifyModeration')}">${t('badgeModeration')}</span>`;
+          } else if (r.verifyStage === 'dead') {
+            verifyBadge = `<span class="badge badge-dead" title="${t('verifyDead')}">${t('badgeDead')}</span>`;
+          } else {
+            verifyBadge = `<span class="badge badge-pending" title="${t('verifyPending')}">${t('badgePendingVerify')}</span>`;
+          }
+        } else if (r.isBlacklisted) {
+          verifyBadge = `<span class="badge badge-blacklisted" title="${t('badgeBlacklisted')}">${t('badgeBlacklisted')}</span>`;
+        }
         return `
       <div class="res-item${r.enabled === false ? ' disabled' : ''}">
         ${fav}
         <span class="badge type">${t(r.type === 'profile' ? 'type_profile' : 'type_blog_comment')}</span>
         <span class="url" title="${esc(r.url)}">${esc(short.length > 34 ? short.slice(0, 34) + '…' : short)}</span>
         <span class="badge ${r.published ? 'st-published' : 'st-' + r.status}">${t(r.published ? 'st_published' : 'st_' + r.status)}</span>
+        ${verifyBadge}
         <span class="ops">
           <input type="checkbox" class="res-enable" data-ract="toggle" data-url="${esc(r.url)}" data-td="${esc(r.targetDomain)}" ${r.enabled !== false ? 'checked' : ''} title="${t('resEnable')}">
           <button class="icon-btn" data-ract="open" data-url="${esc(r.url)}" title="${t('resOpen')}">🔗</button>
@@ -301,6 +321,17 @@ function renderAssistant() {
   if (!status) status = !activeTabUrl ? t('asstNoPage') : stage === 'awaiting_review' ? t('asstReady') : t('asstManual');
   $('#asst-status').textContent = status;
   $('#asst-dot').classList.toggle('idle', stage !== 'awaiting_review');
+
+  // 频控提示：若当前域名今日/本周已有发布记录，展示提示
+  const freqWarnEl = $('#asst-freq-warn');
+  if (freqWarnEl) {
+    if (bound && pub.domainFreq && (pub.domainFreq.daily > 0 || pub.domainFreq.weekly > 0)) {
+      freqWarnEl.hidden = false;
+      freqWarnEl.textContent = t('asstFreqNotice', { daily: pub.domainFreq.daily, weekly: pub.domainFreq.weekly });
+    } else {
+      freqWarnEl.hidden = true;
+    }
+  }
 
   // 步骤按钮：激活标签页是可注入网页即可点、可反复触发；
   // 「自动填写表单」需评论已生成（绑定会话的 manual.comment）；本地 busy 中的步骤临时置灰防重入
@@ -568,9 +599,30 @@ async function reloadTemplates(selected) {
   } catch { /* 面板打开时后台未必就绪，忽略 */ }
 }
 
+/* ---- 弹窗通用控制 ---- */
+function showModal(title, bodyHtml, footHtml = '') {
+  $('#modal-title').textContent = title;
+  $('#modal-body').innerHTML = bodyHtml;
+  $('#modal-foot').innerHTML = footHtml;
+  $('#modal-foot').style.display = footHtml ? 'flex' : 'none';
+  $('#modal-overlay').hidden = false;
+}
+
+function closeModal() {
+  $('#modal-overlay').hidden = true;
+  $('#modal-body').innerHTML = '';
+  $('#modal-foot').innerHTML = '';
+}
+
 // ================= 事件绑定 =================
 
 function bindEvents() {
+  // 弹窗关闭
+  $('#modal-close').addEventListener('click', closeModal);
+  $('#modal-overlay').addEventListener('click', (e) => {
+    if (e.target.id === 'modal-overlay') closeModal();
+  });
+
   // Tab 切换
   $('#tabs').addEventListener('click', (e) => {
     const btn = e.target.closest('.tab');
@@ -589,6 +641,23 @@ function bindEvents() {
       const domain = $('#collect-domain').value.trim();
       if (!domain) return toast(t('targetDomain') + '?', 'error');
       await act({ type: 'startCollect', domain, provider: $('#collect-provider').value });
+    }
+  });
+
+  // 从种子继续（取下一个未使用的种子域名回填并标记已使用）
+  $('#btn-continue-seed').addEventListener('click', async () => {
+    try {
+      const res = await send({ type: 'seeds:pickNext' });
+      if (!res || !res.ok) {
+        return toast(res?.error || t('noUnusedSeeds'), 'error');
+      }
+      const domain = res.seed?.domain;
+      if (!domain) return toast(t('noUnusedSeeds'), 'error');
+      $('#collect-domain').value = domain;
+      await send({ type: 'seeds:markUsed', domain });
+      toast(t('seedPicked', { domain }), 'success');
+    } catch (e) {
+      toast(e.message, 'error');
     }
   });
 
@@ -782,6 +851,83 @@ function bindEvents() {
     for (const r of all) r.enabled = enabled;
     renderLibrary();
     await act({ type: 'setLibraryEnabled', keys: all.map((r) => [r.targetDomain, r.url]), enabled });
+  });
+
+  // 外链 Spam 清洗（seo.web.cafe 自动检测 / 网页打开）
+  $('#btn-spam-clean').addEventListener('click', () => {
+    const bodyHtml = `
+      <p style="margin-bottom:12px;line-height:1.5">${t('spamModalDesc')}</p>
+      <div style="display:flex;flex-direction:column;gap:8px">
+        <button id="modal-spam-direct" class="btn btn-primary btn-block">${t('spamDirectBtn')}</button>
+        <button id="modal-spam-open" class="btn btn-outline btn-block" style="margin-top:0">${t('spamOpenBtn')}</button>
+      </div>
+    `;
+    showModal(t('spamModalTitle'), bodyHtml);
+
+    $('#modal-spam-direct').addEventListener('click', async () => {
+      closeModal();
+      toast(t('spamChecking'), 'info');
+      try {
+        const res = await send({ type: 'spam:checkDirect' });
+        if (res && res.ok) {
+          toast(t('spamDone', { spam: res.spamCount, clean: res.cleanCount, disabled: res.disabledCount }), 'success');
+          loadLibrary();
+        } else {
+          const errMsg = res?.error || '';
+          if (confirm(`${t('spamDirectFailPrompt')}\n(${errMsg})`)) {
+            await send({ type: 'spam:openPage' });
+          }
+        }
+      } catch (err) {
+        toast(err.message, 'error');
+      }
+    });
+
+    $('#modal-spam-open').addEventListener('click', async () => {
+      closeModal();
+      await send({ type: 'spam:openPage' });
+    });
+  });
+
+  // 黑名单管理（查看 / 批量导入 / 清空）
+  $('#btn-blacklist-manage').addEventListener('click', async () => {
+    let list = [];
+    try {
+      const res = await send({ type: 'blacklist:get' });
+      if (res && res.list) list = res.list;
+    } catch { /* 忽略 */ }
+
+    const bodyHtml = `
+      <div style="margin-bottom:8px;font-size:12px;color:var(--text-dim)">${t('blacklistCount', { n: list.length })}</div>
+      <textarea id="bl-input" rows="5" placeholder="${t('blacklistImportPh')}" style="width:100%;font-size:12px;margin-bottom:10px"></textarea>
+      ${list.length ? `<div style="max-height:80px;overflow-y:auto;font-size:11px;color:var(--text-faint);background:var(--input);padding:6px;border-radius:6px">${list.map((b) => esc(b.domain)).join(', ')}</div>` : ''}
+    `;
+    const footHtml = `
+      <button id="modal-bl-clear" class="btn btn-ghost btn-sm" style="color:var(--red)">${t('blacklistClearBtn')}</button>
+      <button id="modal-bl-import" class="btn btn-primary btn-sm">${t('blacklistImportBtn')}</button>
+    `;
+    showModal(t('blacklistModalTitle'), bodyHtml, footHtml);
+
+    $('#modal-bl-clear').addEventListener('click', async () => {
+      if (!confirm(t('blacklistClearConfirm'))) return;
+      await send({ type: 'blacklist:clear' });
+      closeModal();
+      toast(t('saved'), 'success');
+      loadLibrary();
+    });
+
+    $('#modal-bl-import').addEventListener('click', async () => {
+      const val = $('#bl-input')?.value.trim();
+      if (!val) return;
+      const res = await send({ type: 'blacklist:import', domains: val });
+      closeModal();
+      if (res && res.ok) {
+        toast(t('blacklistImported', { imported: res.imported, disabled: res.disabledCount }), 'success');
+        loadLibrary();
+      } else {
+        toast(res?.error || '导入失败', 'error');
+      }
+    });
   });
 
   // 导出收集数据集 CSV

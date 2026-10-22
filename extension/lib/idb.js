@@ -5,16 +5,21 @@
  *  - analysis ：分析结论 + 可用资源（含 enabled 启停标记），主键 [targetDomain, url]
  *  - published：已发过的外链 {url, targetUrl, targetDomain, taskName, publishedAt}（publishedAt 为本地日期时间字符串，targetDomain 为同行网站域名），主键 [url, targetUrl]
  *  - templates：发布任务模板 {name, targetUrl, siteIntro, mainKeyword, mode, updatedAt}，主键 name
+ *  - seeds    ：滚雪球挖出的同行站长域名 {domain, fromUrl, refDomain, addedAt, status}，主键 domain
+ *  - blacklist：垃圾/失效外链黑名单 {domain, reason, source, addedAt}，主键 domain
  * v1 → v2：resources 表废弃（可用资源复用 analysis 表），其中已发布记录迁入 published 后删表
  * v2 → v3：新增 templates 表
+ * v3 → v4：新增 seeds 和 blacklist 表
  */
 const DB_NAME = 'bcm-idb';
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 const STORE_META = [
   ['backlinks', ['targetDomain', 'url']],
   ['analysis', ['targetDomain', 'url']],
   ['published', ['url', 'targetUrl']],
   ['templates', 'name'],
+  ['seeds', 'domain'],
+  ['blacklist', 'domain'],
 ];
 let dbPromise = null;
 

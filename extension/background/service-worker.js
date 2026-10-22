@@ -4,13 +4,15 @@
 import {
   load, getState, save, clearAll, addLog, domainOf,
 } from '../lib/storage.js';
-import { backlinksCsv } from '../lib/util.js';
+import { backlinksCsv, waitTabComplete, sleep } from '../lib/util.js';
 import { idbGet, idbGetDomain, idbGetAll, idbPut, idbPutAll, idbDelete } from '../lib/idb.js';
 import { CollectController } from './collect.js';
 import { PublishAssistant } from './publish.js';
 import { testKey } from '../lib/openrouter.js';
+import { runVerifyDue } from './verify.js';
 
 const ALARM_TICK = 'bcm-tick';
+const ALARM_SPAM_CLEAN = 'bcm-spam-clean';
 
 // 点击工具栏图标直接打开侧边栏（无 popup）
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch((e) => {
@@ -44,29 +46,47 @@ async function snapshot() {
   const st = getState();
   // 可用资源 = analysis 表命中结论的记录（不经内存态）；同一 url 可能被多个目标域名收集到，按 url 去重合并：
   // 任一记录停用即停用，对当前任务目标地址发布过即标 published
-  const [analysis, published] = await Promise.all([
+  const [analysis, published, seeds, blacklist] = await Promise.all([
     idbGetAll('analysis').catch(() => []),
     idbGetAll('published').catch(() => []),
+    idbGetAll('seeds').catch(() => []),
+    idbGetAll('blacklist').catch(() => []),
   ]);
-  const publishedUrls = publishedUrlSet(published, st);
+  const target = taskTargetUrl(st);
+  const pubMap = new Map();
+  for (const p of published) {
+    if (p && p.url && p.targetUrl === target) {
+      pubMap.set(p.url, p);
+    }
+  }
+  const publishedUrls = new Set(pubMap.keys());
+  const blackSet = new Set(blacklist.map((b) => b.domain));
   const hits = analysis
     .filter((r) => r && r.url && VALID_STATUSES.includes(r.status))
     .sort((a, b) => (b.checkedAt || 0) - (a.checkedAt || 0)); // 新命中的在前
   const byUrl = new Map();
   for (const r of hits) {
     const cur = byUrl.get(r.url);
+    const pub = pubMap.get(r.url);
+    const host = domainOf(r.url);
+    const isBlacklisted = blackSet.has(host);
     if (!cur) {
       byUrl.set(r.url, {
         url: r.url,
-        domain: domainOf(r.url),
+        domain: host,
         status: r.status,
-        enabled: r.enabled !== false, // 旧数据无该字段，默认启用
+        enabled: !isBlacklisted && r.enabled !== false, // 黑名单强制停用
         published: publishedUrls.has(r.url),
+        verifyStage: pub?.verifyStage || '',
+        rel: pub?.rel || '',
+        isBlacklisted,
         checkedAt: r.checkedAt,
       });
     } else {
-      cur.enabled = cur.enabled && r.enabled !== false;
+      cur.enabled = cur.enabled && !isBlacklisted && r.enabled !== false;
       cur.published = cur.published || publishedUrls.has(r.url);
+      if (pub?.verifyStage) cur.verifyStage = pub.verifyStage;
+      if (pub?.rel) cur.rel = pub.rel;
     }
   }
   const resources = [...byUrl.values()];
@@ -81,7 +101,9 @@ async function snapshot() {
       analyzed: st.collectState.analyzed,
       matched: st.collectState.matched,
       queued: st.collectState.queued,
-      seeds: st.collectState.seeds.length,
+      seeds: seeds.length,
+      newSeeds: seeds.filter((s) => s.status !== 'used').length,
+      blacklistCount: blacklist.length,
     },
     // 助手页顶部「当前任务」配置（目标地址/网站介绍/主关键词）
     assistantTask: { ...st.assistantTask },
@@ -120,6 +142,9 @@ async function snapshot() {
       minAscore: st.settings.minAscore,
       logEnabled: st.settings.logEnabled !== false,
       aiTimeoutMs: st.settings.aiTimeoutMs, // 助手页步骤按钮看门狗用（aiTimeoutMs * 3 + 30000）
+      autoSpamClean: st.settings.autoSpamClean !== false,
+      spamCleanIntervalHours: st.settings.spamCleanIntervalHours || 24,
+      lastSpamCleanAt: st.settings.lastSpamCleanAt || 0,
     },
   };
 }
@@ -139,8 +164,10 @@ function ensureAlarm(on) {
   }
 }
 
-function isIdle() {
-  return getState().collectState.status === 'idle';
+async function isIdle() {
+  if (getState().collectState.status !== 'idle') return false;
+  const rows = await idbGetAll('published').catch(() => []);
+  return !rows.some((r) => r && r.verifyAt && r.verifyStage !== 'done' && r.verifyStage !== 'dead');
 }
 
 /**
@@ -207,6 +234,172 @@ async function refreshCollectStatsFromIdb() {
   }
 }
 
+// ---------------- Spam 清洗辅助函数 ----------------
+
+/** 直接调用 seo.web.cafe/spam/ 接口批量检测域名是否为 Spam */
+async function checkSpamDomainsDirectly(domains) {
+  if (!domains || !domains.length) return { ok: false, error: '没有需要查询的域名' };
+  try {
+    const htmlRes = await fetch('https://seo.web.cafe/spam/', { cache: 'no-store' });
+    if (!htmlRes.ok) throw new Error('无法访问 Spam 工具页 (HTTP ' + htmlRes.status + ')');
+    const html = await htmlRes.text();
+    const tokenMatch = html.match(/name="spam-token"\s+content="([^"]+)"/i) || html.match(/content="([^"]+)"\s+name="spam-token"/i);
+    const token = tokenMatch ? tokenMatch[1] : '';
+    if (!token) throw new Error('未获取到工具页面 spam-token');
+
+    const spamDomains = [];
+    const cleanDomains = [];
+    const unknownDomains = [];
+    const CHUNK = 50;
+
+    for (let i = 0; i < domains.length; i += CHUNK) {
+      const slice = domains.slice(i, i + CHUNK);
+      const res = await fetch('https://seo.web.cafe/spam/api/lookup-batch', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-SPAM-Token': token,
+        },
+        body: JSON.stringify({ domains: slice }),
+      });
+      if (!res.ok) throw new Error('Spam 接口请求失败 (HTTP ' + res.status + ')');
+      const data = await res.json();
+      for (const item of (data.results || [])) {
+        if (!item || !item.domain) continue;
+        if (!item.known) {
+          unknownDomains.push(item.domain);
+        } else if (item.isSpam) {
+          spamDomains.push(item.domain);
+        } else {
+          cleanDomains.push(item.domain);
+        }
+      }
+    }
+    return {
+      ok: true,
+      total: domains.length,
+      spamDomains,
+      cleanDomains,
+      unknownDomains,
+    };
+  } catch (e) {
+    return { ok: false, error: e.message, fallback: true };
+  }
+}
+
+/** 打开 seo.web.cafe/spam/ 页面并自动填入域名列表提交查询 */
+async function openSpamPageWithDomains(domains) {
+  const text = domains.join('\n');
+  const tab = await chrome.tabs.create({ url: 'https://seo.web.cafe/spam/', active: true });
+  await waitTabComplete(tab.id, 20000);
+  await sleep(800);
+  await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    func: (content) => {
+      const ta = document.getElementById('domain');
+      if (ta) {
+        ta.value = content;
+        ta.dispatchEvent(new Event('input', { bubbles: true }));
+        const form = document.getElementById('qform');
+        if (form) {
+          if (form.requestSubmit) form.requestSubmit();
+          else form.dispatchEvent(new Event('submit', { cancelable: true }));
+        }
+      }
+    },
+    args: [text],
+  }).catch(() => {});
+  return { ok: true, tabId: tab.id };
+}
+
+/** 定期自动从资源库及外链库提取全部域名并比对 seo.web.cafe/spam/ 接口，自动更新黑名单并停用垃圾资源 */
+export async function runPeriodicSpamClean(force = false) {
+  const st = getState();
+  const s = st.settings || {};
+  if (!s.autoSpamClean && !force) return { ok: false, reason: 'disabled' };
+
+  const intervalMs = (Number(s.spamCleanIntervalHours) || 24) * 3600 * 1000;
+  const lastAt = Number(s.lastSpamCleanAt) || 0;
+  if (!force && Date.now() - lastAt < intervalMs) {
+    return { ok: false, reason: 'not_due', lastAt, intervalMs };
+  }
+
+  const [analysis, backlinks, blacklist] = await Promise.all([
+    idbGetAll('analysis').catch(() => []),
+    idbGetAll('backlinks').catch(() => []),
+    idbGetAll('blacklist').catch(() => []),
+  ]);
+
+  const blackSet = new Set(blacklist.map((b) => b.domain));
+  const candidateDomains = new Set();
+  for (const r of analysis) {
+    if (r && r.url) {
+      const h = domainOf(r.url);
+      if (h && !blackSet.has(h)) candidateDomains.add(h);
+    }
+  }
+  for (const r of backlinks) {
+    if (r && r.url) {
+      const h = domainOf(r.url);
+      if (h && !blackSet.has(h)) candidateDomains.add(h);
+    }
+  }
+
+  const domains = [...candidateDomains];
+  if (!domains.length) {
+    addLog('system', 'Spam 定期清洗：无待检测域名（库为空或已全部在黑名单）', 'info');
+    s.lastSpamCleanAt = Date.now();
+    await save('settings', 'logs');
+    return { ok: true, total: 0, spamCount: 0 };
+  }
+
+  addLog('system', `Spam 定期清洗开始：共 ${domains.length} 个未拉黑域名待检测`, 'info');
+  const res = await checkSpamDomainsDirectly(domains);
+  s.lastSpamCleanAt = Date.now();
+  await save('settings');
+
+  if (!res.ok) {
+    addLog('system', `Spam 定期清洗失败：${res.error}`, 'warn');
+    await save('logs');
+    return res;
+  }
+
+  const spamDomains = res.spamDomains || [];
+  let disabledCount = 0;
+  if (spamDomains.length) {
+    const now = Date.now();
+    for (const d of spamDomains) {
+      await idbPut('blacklist', {
+        domain: d,
+        reason: 'Ahrefs 定期检测判定为垃圾外链域名 (Is spam)',
+        source: 'periodic_spam_tool',
+        addedAt: now,
+      });
+    }
+    for (const a of analysis) {
+      if (!a || !a.url) continue;
+      const h = domainOf(a.url);
+      if (spamDomains.includes(h) && a.enabled !== false) {
+        a.enabled = false;
+        a.reason = '已自动停用（Ahrefs 定期检测为垃圾外链域名）';
+        await idbPut('analysis', a);
+        disabledCount++;
+      }
+    }
+  }
+
+  addLog('system', `Spam 定期清洗完成：排查 ${domains.length} 个域名，发现垃圾域名 ${spamDomains.length} 个${disabledCount ? `，已自动停用 ${disabledCount} 条资源` : ''}`, spamDomains.length ? 'warn' : 'success');
+  await save('logs');
+  broadcast();
+  return {
+    ok: true,
+    total: domains.length,
+    spamCount: spamDomains.length,
+    cleanCount: (res.cleanDomains || []).length,
+    disabledCount,
+  };
+}
+
 // ---------------- 消息处理 ----------------
 
 async function handleMessage(msg, sender) {
@@ -249,24 +442,41 @@ async function handleMessage(msg, sender) {
 
     // 资源库：直接读 IndexedDB analysis 表，取命中结论（ready/captcha，验证码资源也算命中）的记录（不经内存态）
     case 'getLibraryResources': {
-      const [rows, published] = await Promise.all([
+      const [rows, published, blacklist] = await Promise.all([
         idbGetAll('analysis').catch(() => []),
         idbGetAll('published').catch(() => []),
+        idbGetAll('blacklist').catch(() => []),
       ]);
-      const publishedUrls = publishedUrlSet(published);
+      const st = getState();
+      const target = taskTargetUrl(st);
+      const pubMap = new Map();
+      for (const p of published) {
+        if (p && p.url && p.targetUrl === target) {
+          pubMap.set(p.url, p);
+        }
+      }
+      const blackSet = new Set(blacklist.map((b) => b.domain));
       const resources = rows
         .filter((r) => r && r.url && VALID_STATUSES.includes(r.status))
         .sort((a, b) => (b.checkedAt || 0) - (a.checkedAt || 0)) // 新命中的在前
-        .map((r) => ({
-          url: r.url,
-          domain: domainOf(r.url),
-          targetDomain: r.targetDomain,
-          type: 'blog_comment',
-          status: r.status,
-          enabled: r.enabled !== false, // 旧数据无该字段，默认启用
-          published: publishedUrls.has(r.url), // 对当前任务目标地址发布过才算已发布
-          checkedAt: r.checkedAt,
-        }));
+        .map((r) => {
+          const host = domainOf(r.url);
+          const isBlacklisted = blackSet.has(host);
+          const pub = pubMap.get(r.url);
+          return {
+            url: r.url,
+            domain: host,
+            targetDomain: r.targetDomain,
+            type: 'blog_comment',
+            status: r.status,
+            enabled: !isBlacklisted && r.enabled !== false, // 黑名单强制停用
+            published: !!pub, // 对当前任务目标地址发布过才算已发布
+            verifyStage: pub?.verifyStage || '',
+            rel: pub?.rel || '',
+            isBlacklisted,
+            checkedAt: r.checkedAt,
+          };
+        });
       return { ok: true, resources };
     }
 
@@ -401,6 +611,14 @@ async function handleMessage(msg, sender) {
       if (patch.aiTimeoutMs != null) {
         st.settings.aiTimeoutMs = Math.min(Math.max(Number(patch.aiTimeoutMs) || 20000, 5000), 300000);
       }
+      // 频控与安全约束（补充20261020规范）
+      if (patch.dailyPerDomain != null) st.settings.dailyPerDomain = Math.max(1, Math.round(Number(patch.dailyPerDomain) || 1));
+      if (patch.weeklyPerDomain != null) st.settings.weeklyPerDomain = Math.max(1, Math.round(Number(patch.weeklyPerDomain) || 2));
+      if (patch.minHoursBetweenDomains != null) st.settings.minHoursBetweenDomains = Math.max(0, Number(patch.minHoursBetweenDomains) || 0.5);
+      if (patch.skipOnCaptcha != null) st.settings.skipOnCaptcha = !!patch.skipOnCaptcha;
+      if (patch.requireIndexed != null) st.settings.requireIndexed = !!patch.requireIndexed;
+      if (patch.autoSpamClean != null) st.settings.autoSpamClean = !!patch.autoSpamClean;
+      if (patch.spamCleanIntervalHours != null) st.settings.spamCleanIntervalHours = Math.max(1, Math.round(Number(patch.spamCleanIntervalHours) || 24));
       await save('settings');
       broadcast();
       return { ok: true, snapshot: await snapshot() };
@@ -408,6 +626,147 @@ async function handleMessage(msg, sender) {
 
     case 'testKey':
       return await testKey(msg.key || '');
+
+    // ---- 滚雪球种子站长（从评论区挖掘的同行域名，存 seeds 表）----
+    case 'seeds:get': {
+      const seeds = await idbGetAll('seeds').catch(() => []);
+      seeds.sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
+      return { ok: true, seeds };
+    }
+
+    case 'seeds:pickNext': {
+      const seeds = await idbGetAll('seeds').catch(() => []);
+      const next = seeds.find((s) => s && s.status !== 'used');
+      if (!next) return { ok: false, error: '暂无未收集的种子域名' };
+      return { ok: true, seed: next };
+    }
+
+    case 'seeds:markUsed': {
+      const domain = msg.domain;
+      if (!domain) return { ok: false, error: '缺少域名' };
+      const item = await idbGet('seeds', domain);
+      if (item) {
+        await idbPut('seeds', { ...item, status: 'used', usedAt: Date.now() });
+        broadcast();
+      }
+      return { ok: true };
+    }
+
+    // ---- 黑名单管理（spam/dead 域名，存 blacklist 表）----
+    case 'blacklist:get': {
+      const list = await idbGetAll('blacklist').catch(() => []);
+      list.sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
+      return { ok: true, list };
+    }
+
+    case 'blacklist:import': {
+      const rawDomains = Array.isArray(msg.domains) ? msg.domains : String(msg.domains || '').split(/[\n,;\s]+/);
+      const domains = rawDomains
+        .map((d) => String(d || '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, '').split('/')[0])
+        .filter((d) => d && d.includes('.'));
+      if (!domains.length) return { ok: false, error: '未提供有效域名' };
+      const reason = msg.reason || '人工回填/导入黑名单';
+      const now = Date.now();
+      for (const d of domains) {
+        await idbPut('blacklist', { domain: d, reason, source: 'manual_import', addedAt: now });
+      }
+      // 同步停用资源库中对应域名的资源（按用户 A3 确认）
+      const allAnalysis = await idbGetAll('analysis').catch(() => []);
+      let disabledCount = 0;
+      for (const a of allAnalysis) {
+        if (!a || !a.url) continue;
+        const host = domainOf(a.url);
+        if (domains.includes(host) && a.enabled !== false) {
+          a.enabled = false;
+          a.reason = `已自动停用（命中黑名单：${host}）`;
+          await idbPut('analysis', a);
+          disabledCount++;
+        }
+      }
+      addLog('system', `已导入 ${domains.length} 个黑名单域名，同步停用库中 ${disabledCount} 条资源`, 'warn');
+      broadcast();
+      return { ok: true, imported: domains.length, disabledCount };
+    }
+
+    case 'blacklist:remove': {
+      const domain = msg.domain;
+      if (!domain) return { ok: false, error: '缺少域名' };
+      await idbDelete('blacklist', domain);
+      addLog('system', `已将 ${domain} 移出黑名单`, 'info');
+      broadcast();
+      return { ok: true };
+    }
+
+    case 'blacklist:clear': {
+      await idbClear('blacklist');
+      addLog('system', '已清空黑名单', 'info');
+      broadcast();
+      return { ok: true };
+    }
+
+    // ---- 外链 Spam 批量清洗（对接 seo.web.cafe/spam/）----
+    case 'spam:checkDirect': {
+      let domains = msg.domains;
+      if (!domains || !domains.length) {
+        const analysis = await idbGetAll('analysis').catch(() => []);
+        domains = [...new Set(analysis.filter((a) => a && a.url).map((a) => domainOf(a.url)).filter(Boolean))];
+      }
+      if (!domains.length) return { ok: false, error: '资源库中暂无待查域名' };
+      addLog('system', `开始批量查询外链 Spam：共 ${domains.length} 个域名`, 'info');
+      const res = await checkSpamDomainsDirectly(domains);
+      if (!res.ok) {
+        addLog('system', `直接调用 Spam 接口失败（${res.error}），可点击「打开页面自动查询」`, 'warn');
+        return res;
+      }
+      const spamDomains = res.spamDomains || [];
+      let disabledCount = 0;
+      if (spamDomains.length) {
+        for (const d of spamDomains) {
+          await idbPut('blacklist', {
+            domain: d,
+            reason: 'Ahrefs 判定为垃圾外链域名 (Is spam)',
+            source: 'spam_tool',
+            addedAt: Date.now(),
+          });
+        }
+        const allAnalysis = await idbGetAll('analysis').catch(() => []);
+        for (const a of allAnalysis) {
+          if (!a || !a.url) continue;
+          const host = domainOf(a.url);
+          if (spamDomains.includes(host) && a.enabled !== false) {
+            a.enabled = false;
+            a.reason = '已自动停用（Ahrefs 判定为垃圾外链域名）';
+            await idbPut('analysis', a);
+            disabledCount++;
+          }
+        }
+      }
+      addLog('system', `外链 Spam 查询完成：共 ${domains.length} 个，发现垃圾域名 ${spamDomains.length} 个${disabledCount ? `，已自动停用 ${disabledCount} 条资源` : ''}`, spamDomains.length ? 'warn' : 'success');
+      broadcast();
+      return {
+        ok: true,
+        total: domains.length,
+        spamCount: spamDomains.length,
+        cleanCount: (res.cleanDomains || []).length,
+        unknownCount: (res.unknownDomains || []).length,
+        disabledCount,
+        spamDomains,
+      };
+    }
+
+    case 'spam:openPage': {
+      let domains = msg.domains;
+      if (!domains || !domains.length) {
+        const analysis = await idbGetAll('analysis').catch(() => []);
+        domains = [...new Set(analysis.filter((a) => a && a.url).map((a) => domainOf(a.url)).filter(Boolean))];
+      }
+      if (!domains.length) return { ok: false, error: '资源库中暂无待查域名' };
+      addLog('system', `正在打开外链 Spam 查询工具页并自动填入 ${domains.length} 个域名...`, 'info');
+      return await openSpamPageWithDomains(domains);
+    }
+
+    case 'spam:runPeriodic':
+      return await runPeriodicSpamClean(true);
 
     // ---- 内容脚本上报 ----
     // 收集数据集导出（侧边栏下载 CSV）：以 IndexedDB 按目标域名读取，跨收集轮次累积
@@ -421,7 +780,9 @@ async function handleMessage(msg, sender) {
     case 'pub:decision': {
       // 助手页 Submit / Skip：操作对象 = 当前激活标签页（须与 publishRuntime 绑定页面一致）；
       // domain = 面板「定位同行网站」输入框的同行域名，Submit 成功时随 published 记录落库
-      return await publish.onDecision(msg.decision, msg.domain);
+      const res = await publish.onDecision(msg.decision, msg.domain);
+      ensureAlarm(true);
+      return res;
     }
 
     case 'pub:markInvalid': {
@@ -432,7 +793,9 @@ async function handleMessage(msg, sender) {
     case 'pub:markPublished': {
       // 助手页「标注为已发过」：往 published 表补一条记录（主键 [url, 当前任务目标地址]）；
       // domain = 面板「定位同行网站」输入框的同行域名（空则回落会话 refDomain）
-      return await publish.markAsPublished(msg.domain);
+      const res = await publish.markAsPublished(msg.domain);
+      ensureAlarm(true);
+      return res;
     }
 
     case 'pub:addResource': {
@@ -475,6 +838,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 // ---- 保活 / 断点续跑（收集队列；发布由助手页对当前标签页驱动，无后台循环）----
 chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === ALARM_SPAM_CLEAN) {
+    (async () => {
+      await load();
+      await runPeriodicSpamClean(false);
+    })().catch((e) => console.error('[BCM] spam clean alarm error', e));
+    return;
+  }
   if (alarm.name !== ALARM_TICK) return;
   (async () => {
     await load();
@@ -485,7 +855,9 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     if (st.collectState.status === 'stopping' && !collect.busy && !collect.scraping) {
       collect.finish('stopCollect');
     }
-    if (isIdle()) ensureAlarm(false);
+    // T+10 分钟回访验证
+    await runVerifyDue(Date.now()).catch((e) => console.error('[BCM] verify error', e));
+    if (await isIdle()) ensureAlarm(false);
   })().catch((e) => console.error('[BCM] alarm error', e));
 });
 
@@ -494,6 +866,7 @@ chrome.runtime.onInstalled.addListener(() => {
     await load();
     ensureControllers();
     await refreshCollectStatsFromIdb();
+    chrome.alarms.create(ALARM_SPAM_CLEAN, { periodInMinutes: 60 });
     const st = getState();
     // 断点续跑：安装/更新时如果状态是 running，恢复队列处理
     if (st.collectState.status === 'running') collect.resume();
@@ -505,6 +878,7 @@ chrome.runtime.onStartup.addListener(() => {
     await load();
     ensureControllers();
     await refreshCollectStatsFromIdb();
+    chrome.alarms.create(ALARM_SPAM_CLEAN, { periodInMinutes: 60 });
     const st = getState();
     if (st.collectState.status === 'running') collect.resume();
   })().catch(console.error);

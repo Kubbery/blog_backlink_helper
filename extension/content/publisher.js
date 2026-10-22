@@ -104,6 +104,15 @@
     }
   }
 
+  /** <a href="...">锚文本</a> → 锚文本（剥掉全部标签），供「有独立网址框」时使用 */
+  function stripAnchors(html) {
+    return String(html || '')
+      .replace(/<a\b[^>]*>([\s\S]*?)<\/a>/gi, (_, inner) => inner.replace(/<[^>]+>/g, '').trim())
+      .replace(/<\/?[a-z][^>]*>/gi, '')
+      .replace(/[ \t]{2,}/g, ' ')
+      .trim();
+  }
+
   // ---------- fill：填表 ----------
 
   let lastFill = null;
@@ -133,12 +142,16 @@
         return true;
       };
 
-      put(pick(form.comment), cfg.comment, 'comment');
+      // 一页只留一条链接：有独立网址框 → 填网址 + 正文剥掉 <a>；
+      // 没有网址框（或网址为空）→ 链接才留在正文里。
+      // 两条同时出现是垃圾外链最典型的信号；而正文 <a> 在 WordPress 新访客评论里又常被过滤，
+      // 所以只要网址框存在且有目标地址，就必须走网址框。
+      const urlEl = pick(form.url || '#url');
+      const useUrlField = !!urlEl && !!identity.website;
+      put(pick(form.comment), useUrlField ? stripAnchors(cfg.comment) : cfg.comment, 'comment');
       put(pick(form.author), identity.name, 'author');
       put(pick(form.email), identity.email, 'email');
-      if (form.linkMethod !== 'comment_body') {
-        put(pick(form.url || '#url'), identity.website, 'website');
-      }
+      if (useUrlField) put(urlEl, identity.website, 'website');
 
       // 「记住我」复选框
       const saveEl = pick(form.saveInfo);
@@ -150,13 +163,15 @@
 
       lastFill = {
         submitSel: form.submit || '',
+        formSelector: form.formSelector || '', // 修复 submit() 范围失效 bug
         resourceUrl: cfg.resourceUrl || null,
         mode: cfg.mode || 'semi',
         submitFound: !!submitBtn,
+        linkChannel: useUrlField ? 'url_field' : 'comment_body',
       };
 
       if (!filled.comment) return { ok: false, error: '评论文本框未找到或未填入' };
-      return { ok: true, filled, submitFound: lastFill.submitFound };
+      return { ok: true, filled, submitFound: lastFill.submitFound, linkChannel: lastFill.linkChannel };
     } catch (e) {
       return { ok: false, error: String((e && e.message) || e) };
     }

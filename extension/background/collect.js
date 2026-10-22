@@ -8,8 +8,8 @@
  */
 import { getState, save, addLog } from '../lib/storage.js';
 import { PROVIDERS, ANALYZE_SELECTORS, LOGIN_HINTS, LIMITS } from '../lib/config.js';
-import { idbPutAll, idbPut, idbGet, idbGetDomain } from '../lib/idb.js';
-import { waitTabComplete, sleep, hostMatches } from '../lib/util.js';
+import { idbPutAll, idbPut, idbGet, idbGetDomain, idbGetAll } from '../lib/idb.js';
+import { waitTabComplete, sleep, hostMatches, extractCommenterDomains } from '../lib/util.js';
 
 export class CollectController {
   constructor(notify) {
@@ -18,6 +18,7 @@ export class CollectController {
     this.scraping = false;// 抓页循环是否在跑
     this.providerDone = false;
     this.roundBase = null; // 本轮分析起始的累积基线（仅用于结束日志里的本轮增量）
+    this.blacklistSet = new Set();
   }
 
   /**
@@ -77,6 +78,7 @@ export class CollectController {
     cs.analyzed = base.analyzed;
     cs.matched = base.matched;
     cs.queued = base.queued;
+    this.blacklistSet = new Set((await idbGetAll('blacklist').catch(() => [])).map((b) => b.domain));
     this.providerDone = false;
     addLog('collect', `开始收集：${PROVIDERS[cs.provider].label} / ${domain}（从页面抓取，仅保留「博客」外链）`, 'info');
     await this.notify(['collectState', 'logs']);
@@ -171,7 +173,7 @@ export class CollectController {
       await chrome.tabs.update(tabId, { url });
     }
     const ok = await waitTabComplete(tabId, LIMITS.navTimeoutMs);
-    if (!ok) throw new Error('外链报告页加载超时');
+    if (!ok) throw new Error('外链报告页加载超时（__gmitm 令牌可能已失效，请在共享面板重新打开工具页）');
     await sleep(LIMITS.pageSettleMs);
   }
 
@@ -315,6 +317,8 @@ export class CollectController {
       const host = u.hostname.toLowerCase();
       if (hostMatches(host, cs.targetDomain)) continue;                // 排除目标站自身
       if (prov.excludeHosts.some((h) => hostMatches(host, h))) continue; // 排除数据源站
+      const cleanHost = host.replace(/^www\./, '');
+      if (this.blacklistSet && this.blacklistSet.has(cleanHost)) continue; // 排除黑名单域名
       if (/\.(jpg|jpeg|png|gif|webp|svg|css|js|ico|woff2?|ttf|pdf)(\?|$)/i.test(u.pathname)) continue;
       if (!/博客|blog/i.test(r.platform || '')) continue; // 表格「博客」标签（中文=博客，英文=Blog）
       // 页面 AS 下限：能解析出数值且低于阈值的丢弃（解析不到数值的不过滤，避免列缺失时全军覆没）
@@ -439,6 +443,7 @@ export class CollectController {
       startedAt: Date.now(),
     });
     this.roundBase = { analyzed: base.analyzed, matched: base.matched };
+    this.blacklistSet = new Set((await idbGetAll('blacklist').catch(() => [])).map((b) => b.domain));
     cs.queued = cs.queue.length;
     addLog('collect', `开始分析：数据集共 ${base.links.length} 条，已分析过跳过 ${base.links.length - pending.length} 条，本次待分析 ${pending.length} 条`, 'info');
     await this.notify(['collectState', 'logs']);
@@ -488,6 +493,15 @@ export class CollectController {
    */
   async analyzeOne(url) {
     const cs = this.cs;
+    const host = (() => {
+      try { return new URL(url).hostname.replace(/^www\./, '').toLowerCase(); } catch { return ''; }
+    })();
+    if (host && this.blacklistSet && this.blacklistSet.has(host)) {
+      await this.recordAnalysis(cs.targetDomain, url, 'invalid', '域名位于黑名单（已拉黑/Dead/Spam），跳过分析');
+      addLog('collect', `域名位于黑名单，跳过分析：${host}`, 'info', url);
+      return;
+    }
+
     const tabId = await this.ensureAnalyzeTab();
     try {
       await chrome.tabs.update(tabId, { url });
@@ -526,11 +540,62 @@ export class CollectController {
       await this.recordAnalysis(cs.targetDomain, url, data.hasCaptcha ? 'captcha' : 'ready',
         data.hasCaptcha ? '命中，有验证码' : '命中，可发布');
       addLog('collect', `命中博客评论资源（评论表单=有${data.hasCaptcha ? '，验证码=有' : ''}）`, 'success', url);
+
+      // 滚雪球：从已命中的博客评论区提取评论者外链域名作为新同行站长种子
+      if (data.commentHtml) {
+        await this.collectSeedsFromCommentHtml(data.commentHtml, url).catch((e) => {
+          addLog('collect', `滚雪球种子提取异常：${e.message}`, 'warn', url);
+        });
+      }
     } catch (e) {
       // 任何异常：中断当前页加载，按无效资源记录原因，再抛给外层计入「已分析」
       await chrome.tabs.update(tabId, { url: 'about:blank' }).catch(() => {});
       await this.recordAnalysis(cs.targetDomain, url, 'invalid', e.message);
       throw e;
+    }
+  }
+
+  /** 从评论区 HTML 提取评论者留下的外链域名，去重后写入 seeds 表（滚雪球闭环） */
+  async collectSeedsFromCommentHtml(commentHtml, sourceUrl) {
+    const cs = this.cs;
+    const pageDomain = (() => {
+      try { return new URL(sourceUrl).hostname.replace(/^www\./, '').toLowerCase(); } catch { return ''; }
+    })();
+    const candidateSeeds = extractCommenterDomains(commentHtml, {
+      selfHost: pageDomain,
+      excludeHosts: [...(PROVIDERS[cs.provider]?.excludeHosts || []), '3ue.co', 'semrush.com', 'ahrefs.com'],
+    });
+    if (!candidateSeeds.length) return;
+
+    const [existingSeeds, blacklist] = await Promise.all([
+      idbGetAll('seeds').catch(() => []),
+      idbGetAll('blacklist').catch(() => []),
+    ]);
+    const seedSet = new Set(existingSeeds.map((s) => s.domain));
+    const blackSet = new Set(blacklist.map((b) => b.domain));
+
+    let added = 0;
+    for (const seed of candidateSeeds) {
+      if (seedSet.has(seed) || blackSet.has(seed) || seed === cs.targetDomain) continue;
+      // 检查 backlinks 与 analysis 是否已有该域名
+      const [backlinks, analysis] = await Promise.all([
+        idbGetDomain('backlinks', seed).catch(() => []),
+        idbGetDomain('analysis', seed).catch(() => []),
+      ]);
+      if (backlinks.length > 0 || analysis.length > 0) continue;
+
+      await idbPut('seeds', {
+        domain: seed,
+        fromUrl: sourceUrl,
+        refDomain: cs.targetDomain,
+        addedAt: Date.now(),
+        status: 'new',
+      });
+      seedSet.add(seed);
+      added++;
+    }
+    if (added > 0) {
+      addLog('collect', `滚雪球从评论区挖掘到 ${added} 个新站长种子域名`, 'info', sourceUrl);
     }
   }
 
