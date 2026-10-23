@@ -19,9 +19,9 @@
  *   绑定页面时的页面检测（验证码/登录/表单）是纯规则判定，不经 AI；
  *   检测到验证码只提示不阻断（人工可在页面里完成验证后继续执行步骤）。
  */
-import { getState, addLog } from '../lib/storage.js';
+import { getState, addLog, domainOf } from '../lib/storage.js';
 import { PUBLISH_SELECTORS } from '../lib/config.js';
-import { idbGet, idbPut, idbPutAll, idbGetAll } from '../lib/idb.js';
+import { idbGet, idbPut, idbPutAll, idbGetAll, idbDelete } from '../lib/idb.js';
 import { fmtDateTime, samePageUrl } from '../lib/util.js';
 import { detectForm, generateComment, generateIdentity, summarizeArticle, translateComment } from '../lib/openrouter.js';
 
@@ -148,7 +148,9 @@ export class PublishAssistant {
     }
     // 同目标网址已在此页面发布过：提示避免重复评论（不阻断，用户显式操作仍可继续）
     const cfg = this.taskConfig();
-    if (cfg.targetUrl && await idbGet('published', [tab.url, cfg.targetUrl]).catch(() => null)) {
+    const pubRows = await idbGetAll('published').catch(() => []);
+    const isAlreadyPub = cfg.targetUrl && pubRows.some((p) => p && p.targetUrl === cfg.targetUrl && (p.url === tab.url || samePageUrl(p.url, tab.url)));
+    if (isAlreadyPub) {
       rt.uiStatus = { key: 'asstAlreadyPublished' };
     } else {
       // 频控检查与提示（每日同域名上限）
@@ -156,7 +158,6 @@ export class PublishAssistant {
         try { return new URL(tab.url).hostname.replace(/^www\./, '').toLowerCase(); } catch { return ''; }
       })();
       if (tabHost) {
-        const pubRows = await idbGetAll('published').catch(() => []);
         const oneDayAgo = Date.now() - 24 * 3600 * 1000;
         const sameDomainToday = pubRows.filter((p) => {
           if (!p || !p.url) return false;
@@ -227,6 +228,7 @@ export class PublishAssistant {
 
   /** 注入 publisher.js 到页面的所有框架（评论框可能在 iframe 里，如 Disqus）；个别框架不可注入时退回主框架 */
   async injectAll(tabId) {
+    if (!chrome?.scripting) return;
     try {
       await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files: ['content/publisher.js'] });
     } catch {
@@ -240,6 +242,7 @@ export class PublishAssistant {
    * 验证码与登录提示可能在 iframe 里，跨框架取并集。
    */
   async detectAll(tabId) {
+    if (!chrome?.scripting) return null;
     const cfg = {
       func: (c) => window.__BCM_PUB__ && window.__BCM_PUB__.detect(c),
       args: [{ selectors: PUBLISH_SELECTORS }],
@@ -514,22 +517,45 @@ export class PublishAssistant {
   }
 
   /** 助手页「标记为无效资源」：把 analysis 表中当前激活标签页 url 的记录全部停用（enabled=false，数据保留）。不要求绑定会话，只认当前页面 */
-  async markInvalid() {
-    const tab = await this.activeTab();
-    if (!tab) {
-      return { ok: false, error: '当前没有可操作的网页标签页' };
+  async markInvalid(domain, urlParam) {
+    let url = (urlParam || '').trim();
+    if (!url) {
+      const tab = await this.activeTab();
+      if (!tab) {
+        return { ok: false, error: '当前没有可操作的网页标签页' };
+      }
+      url = tab.url;
     }
-    const url = tab.url;
     try {
       const rows = await idbGetAll('analysis');
-      const dirty = rows
-        .filter((r) => r && r.url === url && r.enabled !== false)
-        .map((r) => ({ ...r, enabled: false }));
-      if (!dirty.length) return { ok: false, error: 'analysis 表中没有该页面的资源记录（或已停用）' };
-      await idbPutAll('analysis', dirty);
-      addLog('publish', `已标记为无效资源（enabled=false，共 ${dirty.length} 条）`, 'info', url);
+      const matches = rows.filter((r) => r && (r.url === url || samePageUrl(r.url, url)));
+      if (matches.length > 0) {
+        const dirty = matches.map((r) => ({ ...r, enabled: false }));
+        await idbPutAll('analysis', dirty);
+      } else {
+        // 如果 analysis 表中尚无此记录（如手动浏览或未跑分析的页面）：
+        // 自动补录一条 enabled=false 的记录，避免报错，同时在库中持久化记录为无效资源
+        const allBacklinks = await idbGetAll('backlinks').catch(() => []);
+        const bMatch = allBacklinks.find((b) => b && (b.url === url || samePageUrl(b.url, url)));
+        const targetDomain = (domain || '').trim()
+          || bMatch?.targetDomain
+          || getState().publishRuntime?.refDomain
+          || domainOf(url);
+
+        const newRecord = {
+          targetDomain,
+          url,
+          status: 'ready',
+          type: 'other',
+          enabled: false,
+          reason: 'manual_invalid',
+          checkedAt: Date.now(),
+        };
+        await idbPutAll('analysis', [newRecord]);
+      }
+      addLog('publish', '已标记为无效资源（enabled=false）', 'info', url);
       const rt = getState().publishRuntime;
-      if (rt && rt.resourceUrl === url) {
+      if (rt && (rt.resourceUrl === url || samePageUrl(rt.resourceUrl, url))) {
         rt.uiStatus = { key: 'asstInvalidMarked' };
         await this.notify(['publishRuntime', 'logs']);
       } else {
@@ -538,6 +564,38 @@ export class PublishAssistant {
       return { ok: true };
     } catch (e) {
       addLog('publish', `标记无效资源失败：${e.message}`, 'error', url);
+      return { ok: false, error: e.message };
+    }
+  }
+
+  /** 助手页「恢复为有效资源」：把 analysis 表中当前激活标签页 url 的记录重新启用（enabled=true） */
+  async markValid(urlParam) {
+    let url = (urlParam || '').trim();
+    if (!url) {
+      const tab = await this.activeTab();
+      if (!tab) {
+        return { ok: false, error: '当前没有可操作的网页标签页' };
+      }
+      url = tab.url;
+    }
+    try {
+      const rows = await idbGetAll('analysis');
+      const matches = rows.filter((r) => r && (r.url === url || samePageUrl(r.url, url)));
+      if (matches.length > 0) {
+        const dirty = matches.map((r) => ({ ...r, enabled: true }));
+        await idbPutAll('analysis', dirty);
+      }
+      addLog('publish', '已恢复为有效资源（enabled=true）', 'info', url);
+      const rt = getState().publishRuntime;
+      if (rt && (rt.resourceUrl === url || samePageUrl(rt.resourceUrl, url))) {
+        rt.uiStatus = { key: 'asstValidRestored' };
+        await this.notify(['publishRuntime', 'logs']);
+      } else {
+        await this.notify(['logs']);
+      }
+      return { ok: true };
+    } catch (e) {
+      addLog('publish', `恢复资源失败：${e.message}`, 'error', url);
       return { ok: false, error: e.message };
     }
   }
@@ -558,22 +616,86 @@ export class PublishAssistant {
       return { ok: false, error: '当前任务未配置目标地址（且设置里的身份网址为空），无法归档发布记录' };
     }
     try {
-      if (await idbGet('published', [url, cfg.targetUrl]).catch(() => null)) {
+      const allPub = await idbGetAll('published').catch(() => []);
+      const existing = allPub.find((p) => p && p.targetUrl === cfg.targetUrl && (p.url === url || samePageUrl(p.url, url)));
+      if (existing) {
         return { ok: false, error: '该页面与当前目标地址已有发布记录' };
       }
-      const rt = getState().publishRuntime;
-      const refDomain = (domain || '').trim() || (rt && rt.refDomain) || '';
-      await this.markPublished(url, cfg.targetUrl, cfg.name, refDomain);
-      addLog('publish', '已标注为已发过（记入 published 表）', 'info', url);
-      if (rt && rt.resourceUrl === url) {
-        rt.uiStatus = { key: 'asstPublishedMarked' };
-        await this.notify(['publishRuntime', 'logs']);
-      } else {
-        await this.notify(['logs']);
+
+      const rows = await idbGetAll('analysis').catch(() => []);
+      const hit = rows.find((r) => r && samePageUrl(r.url, url));
+      const canonUrl = hit ? hit.url : url;
+      let rt = getState().publishRuntime;
+      if (!rt || rt.resourceUrl !== url) {
+        rt = await this.bind(tab);
       }
+      const refDomain = (domain || '').trim() || (hit && hit.targetDomain) || (rt && rt.refDomain) || '';
+
+      await this.markPublished(canonUrl, cfg.targetUrl, cfg.name, refDomain);
+      if (canonUrl !== url) {
+        await this.markPublished(url, cfg.targetUrl, cfg.name, refDomain);
+      }
+      if (!hit && refDomain) {
+        await this.ensureAnalysisResource(canonUrl, refDomain);
+      }
+      addLog('publish', '已标注为已发过（记入 published 表）', 'info', canonUrl);
+
+      if (rt) {
+        rt.uiStatus = { key: 'asstPublishedMarked' };
+      }
+      // 记下「上次发布」：使助手页备注按钮可用
+      getState().lastPublish = {
+        url: canonUrl,
+        targetUrl: cfg.targetUrl,
+        taskName: cfg.name,
+        publishedAt: fmtDateTime(),
+        note: '',
+      };
+      await this.notify(['publishRuntime', 'lastPublish', 'logs']);
       return { ok: true };
     } catch (e) {
       addLog('publish', `标注为已发过失败：${e.message}`, 'error', url);
+      return { ok: false, error: e.message };
+    }
+  }
+
+  /**
+   * 助手页/资源库「取消标注为已发过」：从 published 表删除当前任务目标地址下的发布记录（主键 [url, targetUrl]）。
+   * 支持传入指定 url（如来自资源库条目），未传则取当前激活标签页；
+   * 会同时清理 samePageUrl 规范化匹配的历史记录。
+   */
+  async unmarkAsPublished(urlParam) {
+    let url = (urlParam || '').trim();
+    if (!url) {
+      const tab = await this.activeTab();
+      if (!tab) {
+        return { ok: false, error: '当前没有可操作的网页标签页' };
+      }
+      url = tab.url;
+    }
+    const cfg = this.taskConfig();
+    if (!cfg.targetUrl) {
+      return { ok: false, error: '当前任务未配置目标地址，无法定位发布记录' };
+    }
+    try {
+      const allPub = await idbGetAll('published').catch(() => []);
+      const matches = allPub.filter((p) => p && p.targetUrl === cfg.targetUrl && (p.url === url || samePageUrl(p.url, url)));
+      if (!matches.length) {
+        return { ok: false, error: '未找到该页面在当前目标地址下的发布记录' };
+      }
+      for (const m of matches) {
+        await idbDelete('published', [m.url, m.targetUrl]);
+      }
+      addLog('publish', '已取消标注为已发过（已从 published 表移除）', 'info', url);
+
+      const rt = getState().publishRuntime;
+      if (rt && (rt.resourceUrl === url || samePageUrl(rt.resourceUrl, url))) {
+        rt.uiStatus = { key: 'asstPublishedUnmarked' };
+      }
+      await this.notify(['publishRuntime', 'logs']);
+      return { ok: true };
+    } catch (e) {
+      addLog('publish', `取消标注失败：${e.message}`, 'error', url);
       return { ok: false, error: e.message };
     }
   }
@@ -685,7 +807,9 @@ export class PublishAssistant {
       idbGetAll('blacklist').catch(() => []),
     ]);
     const target = targetOverride || this.taskConfig().targetUrl;
-    const pubUrls = new Set(published.filter((r) => r && r.targetUrl === target).map((r) => r.url));
+    const targetPublished = published.filter((r) => r && r.targetUrl === target);
+    const pubUrls = new Set(targetPublished.map((r) => r.url));
+    const isPublishedUrl = (u) => pubUrls.has(u) || targetPublished.some((p) => samePageUrl(p.url, u));
     const blackSet = new Set(blacklist.map((b) => b.domain));
     const settings = getState().settings || {};
 
@@ -715,7 +839,7 @@ export class PublishAssistant {
     const candidates = analysis
       .filter((r) => {
         if (!r || !r.url || r.enabled === false) return false;
-        if ((curUrl && r.url === curUrl) || pubUrls.has(r.url)) return false;
+        if ((curUrl && (r.url === curUrl || samePageUrl(r.url, curUrl))) || isPublishedUrl(r.url)) return false;
         // 遇到验证码直接跳过（可由 settings.skipOnCaptcha 控制）
         if (settings.skipOnCaptcha !== false && r.status === 'captcha') return false;
         if (r.status !== 'ready' && r.status !== 'captcha') return false;

@@ -82,7 +82,7 @@ export class CollectController {
     cs.queued = base.queued;
     this.blacklistSet = new Set((await idbGetAll('blacklist').catch(() => [])).map((b) => b.domain));
     this.providerDone = false;
-    addLog('collect', `开始收集：${PROVIDERS[cs.provider].label} / ${domain}（从页面抓取，仅保留「博客」外链）`, 'info');
+    addLog('collect', `开始收集：${PROVIDERS[cs.provider].label} / ${domain}（从页面抓取外链数据）`, 'info');
     await this.notify(['collectState', 'logs']);
 
     try {
@@ -196,7 +196,7 @@ export class CollectController {
         if (cs.status !== 'running' || cs.mode !== 'collect') return;
         const rows = await this.scrapePageRows(tabId);
         const kept = this.onScrapedRows(rows, page);
-        addLog('collect', `第 ${page} 页：抓到 ${rows.length} 行，保留「博客」外链 ${kept} 条（累计 ${cs.discovered}）`, 'info');
+        addLog('collect', `第 ${page} 页：抓到 ${rows.length} 行，保留候选外链 ${kept} 条（累计 ${cs.discovered}）`, 'info');
         await this.notify(['collectState', 'logs']);
 
         const next = await this.nextBtnState(tabId);
@@ -322,7 +322,7 @@ export class CollectController {
       const cleanHost = host.replace(/^www\./, '');
       if (this.blacklistSet && this.blacklistSet.has(cleanHost)) continue; // 排除黑名单域名
       if (/\.(jpg|jpeg|png|gif|webp|svg|css|js|ico|woff2?|ttf|pdf)(\?|$)/i.test(u.pathname)) continue;
-      if (!/博客|blog/i.test(r.platform || '')) continue; // 表格「博客」标签（中文=博客，英文=Blog）
+      // 支持各类手动外链平台（博客、论坛、目录、商业列表、媒体等），不再硬编码仅限「博客」
       // 页面 AS 下限：能解析出数值且低于阈值的丢弃（解析不到数值的不过滤，避免列缺失时全军覆没）
       const asText = String(r.ascore || '').trim();
       if (asText !== '') {
@@ -527,22 +527,53 @@ export class CollectController {
       const data = res && res.result;
       if (!data || !data.ok) throw new Error((data && data.error) || '分析器无返回（页面可能被反爬拦截）');
 
-      // 规则判定：要登录 → 跳过；无评论表单 → 不入库；有表单 → 命中（有验证码标记状态）
-      // 可用资源 = analysis 表里命中结论的记录，不再单独写 resources 表
-      if (data.loginRequired) {
-        await this.recordAnalysis(cs.targetDomain, url, 'login', '页面要求登录后才能评论');
+      // 多分类判定逻辑
+      const sigs = data.signals || {};
+      let type = 'uncategorized';
+      if (sigs.isComment && data.hasForm) {
+        type = 'blog_comment';
+      } else if (sigs.isGuestPost) {
+        type = 'guest_post';
+      } else if (sigs.isDirectory) {
+        type = 'directory';
+      } else if (sigs.isResourcePage) {
+        type = 'resource_page';
+      } else if (sigs.isForum) {
+        type = 'forum_community';
+      } else if (data.emails && data.emails.length > 0) {
+        type = 'outreach_contact';
+      } else {
+        type = 'uncategorized';
+      }
+
+      // 如果是纯博客评论且要求登录，标记为 login
+      if (type === 'blog_comment' && data.loginRequired) {
+        await this.recordAnalysis(cs.targetDomain, url, 'login', '页面要求登录后才能评论', { type });
         addLog('collect', '页面要求登录后才能评论，跳过', 'info', url);
         return;
       }
-      if (!data.hasForm) {
-        await this.recordAnalysis(cs.targetDomain, url, 'no_form', '未找到评论表单');
-        addLog('collect', '未找到评论表单，不匹配', 'info', url);
-        return;
-      }
-      // matched 不在运行中增量累加：由 loop 每条的 syncStatsFromIdb 对账得出
-      await this.recordAnalysis(cs.targetDomain, url, data.hasCaptcha ? 'captcha' : 'ready',
-        data.hasCaptcha ? '命中，有验证码' : '命中，可发布');
-      addLog('collect', `命中博客评论资源（评论表单=有${data.hasCaptcha ? '，验证码=有' : ''}）`, 'success', url);
+
+      // 无论属于哪个手工分类，都作为可用资源入库（有验证码记为 captcha，其余记为 ready）
+      const status = data.hasCaptcha ? 'captcha' : 'ready';
+      const typeLabelMap = {
+        blog_comment: '博客评论',
+        guest_post: '客座投稿',
+        directory: '目录导航',
+        resource_page: '资源推荐',
+        forum_community: '论坛社区',
+        outreach_contact: '站长邮件',
+        uncategorized: '未分类资源',
+      };
+      const typeLabel = typeLabelMap[type] || '外链资源';
+      const reason = `命中${typeLabel}${data.hasCaptcha ? '（有验证码）' : ''}${data.emails && data.emails.length ? '，提取到邮箱' : ''}`;
+
+      await this.recordAnalysis(cs.targetDomain, url, status, reason, {
+        type,
+        emails: data.emails || [],
+        contactEmail: (data.emails && data.emails[0]) || '',
+        contactUrl: data.contactUrl || '',
+      });
+      addLog('collect', `命中${typeLabel}：${url}${data.emails && data.emails.length ? ' [✉ ' + data.emails[0] + ']' : ''}`, 'success', url);
 
       // 滚雪球：从已命中的博客评论区提取评论者外链域名作为新同行站长种子
       if (data.commentHtml) {
@@ -602,8 +633,8 @@ export class CollectController {
     }
   }
 
-  /** 分析结论写入 IndexedDB（失败只告警，不影响主流程）；保留已有记录的 enabled 启停标记 */
-  async recordAnalysis(domain, url, status, reason) {
+  /** 分析结论写入 IndexedDB（失败只告警，不影响主流程）；保留已有记录的 enabled 启停标记与人工修改的分类 */
+  async recordAnalysis(domain, url, status, reason, extra = {}) {
     try {
       const old = await idbGet('analysis', [domain, url]).catch(() => null);
       let myTargetDomain = old?.myTargetDomain || '';
@@ -611,6 +642,11 @@ export class CollectController {
         const bl = await idbGet('backlinks', [domain, url]).catch(() => null);
         myTargetDomain = bl?.myTargetDomain || this.cs.myTargetDomain || '';
       }
+      // 人工修改过分类则优先保留人工分类
+      const type = (old?.manualType && old?.type)
+        ? old.type
+        : (extra.type || old?.type || 'uncategorized');
+
       await idbPut('analysis', {
         ...(old || {}),
         targetDomain: domain,
@@ -618,6 +654,11 @@ export class CollectController {
         url,
         status,
         reason,
+        type,
+        emails: extra.emails || old?.emails || [],
+        contactEmail: extra.contactEmail || old?.contactEmail || ((extra.emails && extra.emails[0]) || ''),
+        contactUrl: extra.contactUrl || old?.contactUrl || '',
+        submitUrl: extra.submitUrl || old?.submitUrl || '',
         checkedAt: Date.now(),
       });
     } catch (e) {

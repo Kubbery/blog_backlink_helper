@@ -1125,6 +1125,40 @@ textarea {
   border: 1px solid var(--primary);
 }
 
+select.badge.type-select {
+  background: var(--primary-light);
+  color: var(--primary-hover);
+  border: 1px solid var(--primary);
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 700;
+  border-radius: 6px;
+  padding: 3px 6px;
+  cursor: pointer;
+  outline: none;
+  transition: all 0.15s ease;
+}
+
+select.badge.type-select:hover {
+  background: #ffffff;
+  border-color: var(--primary-hover);
+}
+
+.badge.badge-email {
+  background: #fef3c7;
+  color: #b45309;
+  border: 1px solid #f59e0b;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  cursor: pointer;
+}
+
+.badge.badge-email:hover {
+  background: #fde68a;
+}
+
 .badge.st-ready {
   background: var(--green-light);
   color: #059669;
@@ -1137,6 +1171,18 @@ textarea {
   border: 1px solid var(--border-strong);
 }
 
+.badge.st-published.clickable-badge {
+  cursor: pointer;
+  user-select: none;
+  transition: all 0.15s ease;
+}
+
+.badge.st-published.clickable-badge:hover {
+  background: var(--red-light);
+  color: var(--red);
+  border-color: var(--red);
+}
+
 .badge.st-failed {
   background: var(--red-light);
   color: #dc2626;
@@ -1147,6 +1193,24 @@ textarea {
   background: var(--orange-light);
   color: #d97706;
   border: 1px solid var(--orange);
+}
+
+.badge.st-invalid {
+  background: #f1f5f9;
+  color: #64748b;
+  border: 1px solid #cbd5e1;
+}
+
+.badge.st-invalid.clickable-badge {
+  cursor: pointer;
+  user-select: none;
+  transition: all 0.15s ease;
+}
+
+.badge.st-invalid.clickable-badge:hover {
+  background: var(--green-light);
+  color: #059669;
+  border-color: var(--green);
 }
 
 .badge.badge-dofollow {
@@ -1288,6 +1352,8 @@ textarea {
   max-width: 90%;
   box-shadow: var(--shadow-lg);
   font-weight: 600;
+  white-space: pre-line;
+  text-align: center;
 }
 
 #toast.error {

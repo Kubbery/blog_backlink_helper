@@ -64,13 +64,13 @@
         <div class="stats" id="collect-stats">
           <div class="stat"><div class="num" id="st-analyzed">0</div><div class="lbl" data-i18n="stat_analyzed">已分析</div></div>
           <div class="stat"><div class="num" id="st-queued">0</div><div class="lbl" data-i18n="stat_queued">队列中</div></div>
-          <div class="stat"><div class="num green" id="st-matched">0</div><div class="lbl" data-i18n="stat_matched">博客评论资源</div></div>
+          <div class="stat"><div class="num green" id="st-matched">0</div><div class="lbl" data-i18n="stat_matched">外链资源</div></div>
         </div>
         <div class="seed-line" id="collect-seeds" hidden>
           <span id="seeds-info"></span>
           <button id="btn-continue-seed" class="btn btn-ghost btn-sm" style="margin-left:auto" data-i18n="continueFromSeed">从种子继续</button>
         </div>
-        <div class="hint-line" data-i18n="matchedHint">命中的博客评论资源已存入「资源库」Tab</div>
+        <div class="hint-line" data-i18n="matchedHint">命中的外链资源已存入「资源库」Tab</div>
       </div>
     </section>
 
@@ -119,7 +119,10 @@
       </div>
 
       <div class="form-row" style="margin-top:12px">
-        <label class="field-label" data-i18n="asstCurrentUrl">当前资源（当前激活标签页）</label>
+        <div style="display:flex;align-items:center;justify-content:space-between">
+          <label class="field-label" data-i18n="asstCurrentUrl">当前资源（当前激活标签页）</label>
+          <span id="asst-pub-badge" class="badge st-published" style="display:none" data-i18n="st_published">已发布</span>
+        </div>
         <div class="asst-url" id="asst-url"></div>
       </div>
       <button id="asst-next" class="btn btn-outline btn-block" style="margin-top:0" data-i18n="asstNext">换一个（打开未发布资源）</button>
@@ -195,13 +198,19 @@
       <div class="chips" id="type-chips">
         <button class="chip active" data-type="all" data-i18n="filterAll">全部</button>
         <button class="chip" data-type="blog_comment" data-i18n="type_blog_comment">博客评论</button>
-        <button class="chip" data-type="profile" data-i18n="type_profile">个人主页</button>
+        <button class="chip" data-type="guest_post" data-i18n="type_guest_post">客座投稿</button>
+        <button class="chip" data-type="directory" data-i18n="type_directory">目录导航</button>
+        <button class="chip" data-type="resource_page" data-i18n="type_resource_page">资源推荐</button>
+        <button class="chip" data-type="forum_community" data-i18n="type_forum_community">论坛社区</button>
+        <button class="chip" data-type="outreach_contact" data-i18n="type_outreach_contact">站长邮件</button>
+        <button class="chip" data-type="uncategorized" data-i18n="type_uncategorized">未分类</button>
       </div>
       <div class="chips" id="status-chips">
         <button class="chip" data-status="ready" data-i18n="st_ready">可发布</button>
         <button class="chip" data-status="published" data-i18n="st_published">已发布</button>
         <button class="chip" data-status="failed" data-i18n="st_failed">失败</button>
         <button class="chip" data-status="captcha" data-i18n="st_captcha">有验证码</button>
+        <button class="chip" data-status="invalid" data-i18n="st_invalid">已停用</button>
       </div>
       <div class="count-row">
         <div class="count-line" id="res-count">共 0 条资源</div>

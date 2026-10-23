@@ -146,6 +146,31 @@ test('markAsPublished：同主键已有记录 → 拒绝覆盖', async () => {
   assert.equal(row.targetDomain, 'peer-b.com'); // 原记录不动
 });
 
+test('markAsPublished：URL 仅尾部斜杠或大小写差异（samePageUrl）→ 识别已发过拒绝覆盖', async () => {
+  const a = assistant();
+  activeTabUrl = 'https://marked.com/post/'; // 带尾部斜杠
+  getState().assistantTask = { name: '任务B', targetUrl: 'https://me-b.com', siteIntro: '', mainKeyword: '' };
+  const res = await a.markAsPublished('other-peer.com');
+  assert.equal(res.ok, false);
+  assert.equal(res.error, '该页面与当前目标地址已有发布记录');
+});
+
+test('markAsPublished：标注成功后自动绑定当前会话、更新 uiStatus 与 lastPublish', async () => {
+  const a = assistant();
+  activeTabUrl = 'https://new-marked.com/article';
+  getState().assistantTask = { name: '任务C', targetUrl: 'https://me-c.com', siteIntro: '', mainKeyword: '' };
+  const res = await a.markAsPublished('peer-c.com');
+  assert.equal(res.ok, true);
+  const rt = getState().publishRuntime;
+  assert.ok(rt);
+  assert.equal(rt.resourceUrl, 'https://new-marked.com/article');
+  assert.equal(rt.uiStatus?.key, 'asstPublishedMarked');
+  const lp = getState().lastPublish;
+  assert.ok(lp);
+  assert.equal(lp.url, 'https://new-marked.com/article');
+  assert.equal(lp.targetUrl, 'https://me-c.com');
+});
+
 test('markAsPublished：目标地址为空（任务与身份网址都缺）→ 拒绝', async () => {
   const a = assistant();
   activeTabUrl = 'https://no-target.com/p';
@@ -155,6 +180,30 @@ test('markAsPublished：目标地址为空（任务与身份网址都缺）→ �
   assert.equal(res.ok, false);
   const rows = (await idbGetAll('published')).filter((r) => r.url === 'https://no-target.com/p');
   assert.equal(rows.length, 0);
+});
+
+test('unmarkAsPublished：从 published 表删除当前目标地址下的发布记录', async () => {
+  const a = assistant();
+  activeTabUrl = 'https://new-marked.com/article'; // 前面已写入
+  getState().assistantTask = { name: '任务C', targetUrl: 'https://me-c.com', siteIntro: '', mainKeyword: '' };
+  const res = await a.unmarkAsPublished();
+  assert.equal(res.ok, true);
+  const row = await idbGet('published', ['https://new-marked.com/article', 'https://me-c.com']);
+  assert.equal(row, undefined);
+  const rt = getState().publishRuntime;
+  assert.equal(rt?.uiStatus?.key, 'asstPublishedUnmarked');
+});
+
+test('unmarkAsPublished：支持传入指定 URL 并容忍 samePageUrl 规范化删除', async () => {
+  const a = assistant();
+  // 预先写入一条带尾部斜杠的记录
+  await a.markPublished('https://norm-unmark.com/post/', 'https://me-c.com', '任务C', 'peer.com');
+  getState().assistantTask = { name: '任务C', targetUrl: 'https://me-c.com', siteIntro: '', mainKeyword: '' };
+  // 传不带尾部斜杠的 URL 进行取消标注
+  const res = await a.unmarkAsPublished('https://norm-unmark.com/post');
+  assert.equal(res.ok, true);
+  const row = await idbGet('published', ['https://norm-unmark.com/post/', 'https://me-c.com']);
+  assert.equal(row, undefined);
 });
 
 test('navigateTo：当前在新标签页（chrome://newtab）时能够成功导航当前标签页', async () => {
@@ -190,5 +239,43 @@ test('pickNext：当前停留在新标签页时也能挑出未发布资源并成
   assert.equal(res.ok, true);
   assert.equal(res.url, 'https://blog-c.com/p1');
   assert.equal(lastUpdatedTab.url, 'https://blog-c.com/p1');
+});
+
+test('markInvalid：已存在 analysis 记录且有 URL 差异时容忍 samePageUrl 并停用', async () => {
+  const a = assistant();
+  activeTabUrl = 'https://invalid-test.com/post';
+  await idbPutAll('analysis', [
+    { targetDomain: 'peer-inv.com', url: 'https://invalid-test.com/post/', status: 'ready', enabled: true },
+  ]);
+  const res = await a.markInvalid('peer-inv.com');
+  assert.equal(res.ok, true);
+  const row = await idbGet('analysis', ['peer-inv.com', 'https://invalid-test.com/post/']);
+  assert.equal(row.enabled, false);
+});
+
+test('markInvalid：已停用的记录再次标记不报错（幂等），返回成功', async () => {
+  const a = assistant();
+  activeTabUrl = 'https://invalid-test.com/post';
+  const res = await a.markInvalid();
+  assert.equal(res.ok, true);
+});
+
+test('markInvalid：页面尚未在 analysis 表时自动补录为已停用记录，不报错', async () => {
+  const a = assistant();
+  activeTabUrl = 'https://brand-new-page.com/article';
+  const res = await a.markInvalid('manual-peer.com');
+  assert.equal(res.ok, true);
+  const row = await idbGet('analysis', ['manual-peer.com', 'https://brand-new-page.com/article']);
+  assert.ok(row);
+  assert.equal(row.enabled, false);
+});
+
+test('markValid：恢复为有效资源，enabled 重置为 true', async () => {
+  const a = assistant();
+  activeTabUrl = 'https://brand-new-page.com/article';
+  const res = await a.markValid();
+  assert.equal(res.ok, true);
+  const row = await idbGet('analysis', ['manual-peer.com', 'https://brand-new-page.com/article']);
+  assert.equal(row.enabled, true);
 });
 

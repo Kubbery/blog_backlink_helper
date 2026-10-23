@@ -34,12 +34,12 @@ globalThis.chrome = {
   tabs: { onRemoved: capture('onRemoved'), onUpdated: capture('onUpdated') },
 };
 
-let idbPutAll, idbGetAll, getState, resetStatsRefreshDebounce;
+let idbPutAll, idbGetAll, idbDelete, getState, resetStatsRefreshDebounce;
 const sendMsg = (msg) => new Promise((resolve) => listeners.onMessage(msg, {}, resolve));
 
 before(async () => {
   ({ resetStatsRefreshDebounce } = await import('../extension/background/service-worker.js'));
-  ({ idbPutAll, idbGetAll } = await import('../extension/lib/idb.js'));
+  ({ idbPutAll, idbGetAll, idbDelete } = await import('../extension/lib/idb.js'));
   ({ getState } = await import('../extension/lib/storage.js'));
 
   storeData.bcm_store = {
@@ -137,6 +137,29 @@ test('getLibraryResources：取 analysis 表中命中结论（ready/captcha）�
   assert.equal(row.enabled, true); // 旧数据无 enabled 字段，默认启用
   assert.equal(row.published, true); // 上个用例已把 a.com/1 按当前任务目标 me.com 写入 published 表
   assert.equal(res.resources[1].published, false); // a.com/2 只给别的目标发布过，对当前任务算未发布
+});
+
+test('getLibraryResources 与 getSnapshot：published 记录容忍协议、斜杠与锚点差异（samePageUrl）', async () => {
+  await idbPutAll('analysis', [
+    { targetDomain: 'example.com', url: 'https://norm-test.com/post', status: 'ready', checkedAt: 20 },
+  ]);
+  // published 记录带尾部斜杠
+  await idbPutAll('published', [
+    { url: 'https://norm-test.com/post/', targetUrl: 'https://me.com', taskName: 't3', publishedAt: 20 },
+  ]);
+  getState().assistantTask.targetUrl = 'https://me.com';
+  const lib = await sendMsg({ type: 'getLibraryResources' });
+  const hit = lib.resources.find((r) => r.url === 'https://norm-test.com/post');
+  assert.ok(hit);
+  assert.equal(hit.published, true);
+
+  const snap = await sendMsg({ type: 'getSnapshot' });
+  const snapHit = snap.snapshot.resources.find((r) => r.url === 'https://norm-test.com/post');
+  assert.ok(snapHit);
+  assert.equal(snapHit.published, true);
+
+  await idbDelete('analysis', ['example.com', 'https://norm-test.com/post']);
+  await idbDelete('published', ['https://norm-test.com/post/', 'https://me.com']);
 });
 
 test('setLibraryEnabled：停用只改标记不删数据，快照资源同步停用', async () => {
@@ -360,6 +383,25 @@ test('extractSiteInfo：mode="ai" 未配置 Key 时明确报错拒绝', async ()
   const res = await sendMsg({ type: 'extractSiteInfo', url: 'https://www.canva.com', mode: 'ai' });
   assert.equal(res.ok, false);
   assert.match(res.error, /API Key/);
+});
+
+test('updateLibraryResourceType：手动修改资源分类并标记 manualType', async () => {
+  const res = await sendMsg({
+    type: 'updateLibraryResourceType',
+    targetDomain: 'example.com',
+    url: 'https://a.com/1',
+    resourceType: 'directory',
+  });
+  assert.equal(res.ok, true);
+
+  const updated = await (await import('../extension/lib/idb.js')).idbGet('analysis', ['example.com', 'https://a.com/1']);
+  assert.equal(updated.type, 'directory');
+  assert.equal(updated.manualType, true);
+
+  // 资源库获取时体现新分类
+  const lib = await sendMsg({ type: 'getLibraryResources' });
+  const row = lib.resources.find((r) => r.url === 'https://a.com/1');
+  assert.equal(row.type, 'directory');
 });
 
 

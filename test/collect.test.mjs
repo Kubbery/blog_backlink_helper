@@ -83,3 +83,48 @@ test('onScrapedRows 与 recordAnalysis：外链与分析记录带上服务的目
   assert.equal(analysis.myTargetDomain, 'my-target.com');
   assert.equal(analysis.status, 'ready');
 });
+
+test('onScrapedRows：放宽平台过滤，保留目录、论坛、媒体等各类手动外链平台', async () => {
+  const c = new CollectController(async () => {});
+  c.cs.targetDomain = 'peer-site.com';
+  c.cs.seen = [];
+
+  const rawRows = [
+    { url: 'https://dir.com/submit-site', platform: '目录', ascore: '25' },
+    { url: 'https://forum.com/thread-1', platform: '论坛', ascore: '40' },
+    { url: 'https://media.com/news-1', platform: '新闻', ascore: '35' },
+  ];
+  const kept = c.onScrapedRows(rawRows, 1);
+  assert.equal(kept, 3);
+
+  const dirLink = await idbGet('backlinks', ['peer-site.com', 'https://dir.com/submit-site']);
+  assert.ok(dirLink);
+  assert.equal(dirLink.platform, '目录');
+});
+
+test('recordAnalysis：支持多分类与邮箱存储，且人工修改的分类（manualType）不被覆盖', async () => {
+  const c = new CollectController(async () => {});
+  c.cs.targetDomain = 'peer-site.com';
+
+  // 1. 初次分析命中 guest_post，提取到邮箱
+  await c.recordAnalysis('peer-site.com', 'https://guest.com/write-for-us', 'ready', '命中客座投稿', {
+    type: 'guest_post',
+    emails: ['editor@guest.com'],
+    contactEmail: 'editor@guest.com',
+  });
+  let record = await idbGet('analysis', ['peer-site.com', 'https://guest.com/write-for-us']);
+  assert.equal(record.type, 'guest_post');
+  assert.equal(record.contactEmail, 'editor@guest.com');
+
+  // 2. 模拟用户手动修改分类为 outreach_contact
+  record.type = 'outreach_contact';
+  record.manualType = true;
+  await (await import('../extension/lib/idb.js')).idbPut('analysis', record);
+
+  // 3. 再次分析该页面时，应保护用户的 manualType 不被重置
+  await c.recordAnalysis('peer-site.com', 'https://guest.com/write-for-us', 'ready', '重新分析命中', {
+    type: 'guest_post',
+  });
+  const updated = await idbGet('analysis', ['peer-site.com', 'https://guest.com/write-for-us']);
+  assert.equal(updated.type, 'outreach_contact'); // 仍然保留用户修改的分类
+});

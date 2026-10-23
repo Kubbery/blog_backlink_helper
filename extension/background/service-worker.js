@@ -35,7 +35,25 @@ function ensureControllers() {
 
 /** 当前「当前任务」的目标地址（与发布口径一致：缺省回落到设置里的身份网址） */
 function taskTargetUrl(st = getState()) {
-  return (st.assistantTask && st.assistantTask.targetUrl) || st.settings.identity.website || '';
+  return (st.assistantTask && st.assistantTask.targetUrl) || (st.settings && st.settings.identity && st.settings.identity.website) || '';
+}
+
+/** 构建按 targetUrl 匹配已发布记录的高速查找器（优先精确匹配，再容错 samePageUrl 规范化匹配） */
+function buildPublishedLookup(publishedList, targetUrl) {
+  const exactMap = new Map();
+  const targetRecords = [];
+  for (const p of publishedList) {
+    if (p && p.url && p.targetUrl === targetUrl) {
+      exactMap.set(p.url, p);
+      targetRecords.push(p);
+    }
+  }
+  return (url) => {
+    if (!url) return null;
+    const direct = exactMap.get(url);
+    if (direct) return direct;
+    return targetRecords.find((p) => samePageUrl(p.url, url)) || null;
+  };
 }
 
 /** 「已发布」按当前任务判定：published 表中存在 [url, 当前任务目标地址] 记录才算已发布 */
@@ -55,13 +73,8 @@ async function snapshot() {
     idbGetAll('blacklist').catch(() => []),
   ]);
   const target = taskTargetUrl(st);
-  const pubMap = new Map();
-  for (const p of published) {
-    if (p && p.url && p.targetUrl === target) {
-      pubMap.set(p.url, p);
-    }
-  }
-  const publishedUrls = new Set(pubMap.keys());
+  const targetPublished = published.filter((p) => p && p.targetUrl === target);
+  const findPub = buildPublishedLookup(published, target);
   const blackSet = new Set(blacklist.map((b) => b.domain));
   const hits = analysis
     .filter((r) => r && r.url && VALID_STATUSES.includes(r.status))
@@ -69,16 +82,17 @@ async function snapshot() {
   const byUrl = new Map();
   for (const r of hits) {
     const cur = byUrl.get(r.url);
-    const pub = pubMap.get(r.url);
+    const pub = findPub(r.url);
     const host = domainOf(r.url);
     const isBlacklisted = blackSet.has(host);
     if (!cur) {
       byUrl.set(r.url, {
         url: r.url,
         domain: host,
+        type: r.type || 'blog_comment',
         status: r.status,
         enabled: !isBlacklisted && r.enabled !== false, // 黑名单强制停用
-        published: publishedUrls.has(r.url),
+        published: !!pub,
         verifyStage: pub?.verifyStage || '',
         rel: pub?.rel || '',
         isBlacklisted,
@@ -86,7 +100,7 @@ async function snapshot() {
       });
     } else {
       cur.enabled = cur.enabled && !isBlacklisted && r.enabled !== false;
-      cur.published = cur.published || publishedUrls.has(r.url);
+      cur.published = cur.published || !!pub;
       if (pub?.verifyStage) cur.verifyStage = pub.verifyStage;
       if (pub?.rel) cur.rel = pub.rel;
     }
@@ -110,6 +124,7 @@ async function snapshot() {
     },
     // 助手页顶部「当前任务」配置（目标地址/网站介绍/主关键词）
     assistantTask: { ...st.assistantTask },
+    publishedUrls: targetPublished.map((p) => p.url),
     // 助手页（对当前激活标签页的人工交互）所需的全部数据随快照下发：uiStatus.key 由面板经
     // i18n 翻译，动态错误文本用 uiStatus.text；manual 里 name/email 从 identity 展开。
     // 面板按 publish.resourceUrl 与当前激活标签页 URL 是否一致决定字段区与 Submit/Skip 是否生效
@@ -119,6 +134,7 @@ async function snapshot() {
           stage: st.publishRuntime.stage,
           refDomain: st.publishRuntime.refDomain || '',
           uiStatus: st.publishRuntime.uiStatus || null,
+          isPublished: !!findPub(st.publishRuntime.resourceUrl),
           manual: (() => {
             const m = st.publishRuntime.manual || {};
             const id = m.identity || {};
@@ -609,12 +625,7 @@ async function handleMessage(msg, sender) {
       ]);
       const st = getState();
       const target = taskTargetUrl(st);
-      const pubMap = new Map();
-      for (const p of published) {
-        if (p && p.url && p.targetUrl === target) {
-          pubMap.set(p.url, p);
-        }
-      }
+      const findPub = buildPublishedLookup(published, target);
       const blackSet = new Set(blacklist.map((b) => b.domain));
       const resources = rows
         .filter((r) => r && r.url && VALID_STATUSES.includes(r.status))
@@ -622,13 +633,13 @@ async function handleMessage(msg, sender) {
         .map((r) => {
           const host = domainOf(r.url);
           const isBlacklisted = blackSet.has(host);
-          const pub = pubMap.get(r.url);
+          const pub = findPub(r.url);
           return {
             url: r.url,
             domain: host,
             targetDomain: r.targetDomain,
             myTargetDomain: r.myTargetDomain || '',
-            type: 'blog_comment',
+            type: r.type || 'blog_comment',
             status: r.status,
             enabled: !isBlacklisted && r.enabled !== false, // 黑名单强制停用
             published: !!pub, // 对当前任务目标地址发布过才算已发布
@@ -636,9 +647,27 @@ async function handleMessage(msg, sender) {
             rel: pub?.rel || '',
             isBlacklisted,
             checkedAt: r.checkedAt,
+            emails: r.emails || [],
+            contactEmail: r.contactEmail || (r.emails && r.emails[0]) || '',
+            contactUrl: r.contactUrl || '',
           };
         });
       return { ok: true, resources };
+    }
+
+    // 手动修改资源分类：改 analysis 记录的 type 并标记 manualType
+    case 'updateLibraryResourceType': {
+      const { targetDomain, url } = msg;
+      const resourceType = msg.resourceType || msg.newType || msg.typeVal;
+      if (!url || !targetDomain || !resourceType) return { ok: false, error: '缺少参数' };
+      const record = await idbGet('analysis', [targetDomain, url]).catch(() => null);
+      if (!record) return { ok: false, error: '未找到该资源记录' };
+      record.type = resourceType;
+      record.manualType = true;
+      await idbPut('analysis', record);
+      addLog('system', `手动修改资源分类：${url} → ${resourceType}`, 'info', url);
+      broadcast();
+      return { ok: true };
     }
 
     // 资源启用/停用：只改 analysis 记录的 enabled 标记，数据保留（删了下次分析会重跑一遍）
@@ -650,7 +679,7 @@ async function handleMessage(msg, sender) {
       addLog('system', `资源启停请求：${keys.length} 条，enabled=${enabled}`, 'info', keys[0] && keys[0][1]);
       const rows = await idbGetAll('analysis').catch(() => []);
       const dirty = rows
-        .filter((r) => r && r.url && want.has(`${r.targetDomain} ${r.url}`) && (r.enabled !== false) !== enabled)
+        .filter((r) => r && r.url && (want.has(`${r.targetDomain} ${r.url}`) || keys.some(([d, u]) => (!d || d === r.targetDomain) && samePageUrl(u, r.url))) && (r.enabled !== false) !== enabled)
         .map((r) => ({ ...r, enabled }));
       // 一条都没匹配到通常是 key 对不上（主键不一致），打印请求 key 与库存样本对比
       if (!dirty.length && keys.length) {
@@ -948,13 +977,25 @@ async function handleMessage(msg, sender) {
 
     case 'pub:markInvalid': {
       // 助手页「标记为无效资源」：analysis 表该 url 的记录 enabled=false（数据保留）
-      return await publish.markInvalid();
+      return await publish.markInvalid(msg.domain, msg.url);
+    }
+
+    case 'pub:markValid': {
+      // 助手页「恢复为有效资源」：analysis 表该 url 的记录 enabled=true
+      return await publish.markValid(msg.url);
     }
 
     case 'pub:markPublished': {
       // 助手页「标注为已发过」：往 published 表补一条记录（主键 [url, 当前任务目标地址]）；
       // domain = 面板「定位同行网站」输入框的同行域名（空则回落会话 refDomain）
       const res = await publish.markAsPublished(msg.domain);
+      ensureAlarm(true);
+      return res;
+    }
+
+    case 'pub:unmarkPublished': {
+      // 助手页/资源库「取消标注为已发过」：从 published 表删除当前目标地址下的发布记录
+      const res = await publish.unmarkAsPublished(msg.url);
       ensureAlarm(true);
       return res;
     }

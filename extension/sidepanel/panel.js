@@ -32,11 +32,15 @@ function send(msg) {
 
 function toast(text, level = '') {
   const el = $('#toast');
-  el.textContent = text;
+  let msg = text;
+  if (typeof text === 'string' && (text.includes('未知消息类型') || text.includes('Unknown message'))) {
+    msg = `${text}\n(${t('swOutdated')})`;
+  }
+  el.textContent = msg;
   el.className = level;
   el.hidden = false;
   clearTimeout(toast._t);
-  toast._t = setTimeout(() => { el.hidden = true; }, 2200);
+  toast._t = setTimeout(() => { el.hidden = true; }, 3600);
 }
 
 async function act(msg, okMsg) {
@@ -215,9 +219,18 @@ function filteredResources() {
       rs = rs.filter((r) => r.myTargetDomain === filters.targetDomain);
     }
   }
-  if (filters.type !== 'all') rs = rs.filter((r) => r.type === filters.type);
-  if (filters.status === 'published') rs = rs.filter((r) => r.published);
-  else if (filters.status) rs = rs.filter((r) => r.status === filters.status);
+  if (filters.type !== 'all') {
+    rs = rs.filter((r) => (r.type || 'uncategorized') === filters.type);
+  }
+  if (filters.status === 'published') {
+    rs = rs.filter((r) => r.published);
+  } else if (filters.status === 'invalid') {
+    rs = rs.filter((r) => r.enabled === false);
+  } else if (filters.status === 'ready') {
+    rs = rs.filter((r) => r.status === 'ready' && r.enabled !== false);
+  } else if (filters.status) {
+    rs = rs.filter((r) => r.status === filters.status);
+  }
   return rs;
 }
 
@@ -302,12 +315,34 @@ function renderLibrary() {
         } else if (r.isBlacklisted) {
           verifyBadge = `<span class="badge badge-blacklisted" title="${t('badgeBlacklisted')}">${t('badgeBlacklisted')}</span>`;
         }
+        const curType = r.type || 'uncategorized';
+        const typeSelect = `
+          <select class="badge type-select" data-ract="change-type" data-url="${esc(r.url)}" data-td="${esc(r.targetDomain)}" title="${t('changeType')}">
+            <option value="blog_comment" ${curType === 'blog_comment' ? 'selected' : ''}>${t('type_blog_comment')}</option>
+            <option value="guest_post" ${curType === 'guest_post' ? 'selected' : ''}>${t('type_guest_post')}</option>
+            <option value="directory" ${curType === 'directory' ? 'selected' : ''}>${t('type_directory')}</option>
+            <option value="resource_page" ${curType === 'resource_page' ? 'selected' : ''}>${t('type_resource_page')}</option>
+            <option value="forum_community" ${curType === 'forum_community' ? 'selected' : ''}>${t('type_forum_community')}</option>
+            <option value="outreach_contact" ${curType === 'outreach_contact' ? 'selected' : ''}>${t('type_outreach_contact')}</option>
+            <option value="uncategorized" ${curType === 'uncategorized' ? 'selected' : ''}>${t('type_uncategorized')}</option>
+          </select>
+        `;
+        let emailBadge = '';
+        if (r.contactEmail) {
+          const shortEmail = r.contactEmail.length > 18 ? r.contactEmail.slice(0, 16) + '…' : r.contactEmail;
+          emailBadge = `<a class="badge badge-email" href="mailto:${esc(r.contactEmail)}" title="${t('sendEmail')}: ${esc(r.contactEmail)}" target="_blank">✉ ${esc(shortEmail)}</a>`;
+        }
         return `
       <div class="res-item${r.enabled === false ? ' disabled' : ''}">
         ${fav}
-        <span class="badge type">${t(r.type === 'profile' ? 'type_profile' : 'type_blog_comment')}</span>
-        <span class="url" title="${esc(r.url)}">${esc(short.length > 34 ? short.slice(0, 34) + '…' : short)}</span>
-        <span class="badge ${r.published ? 'st-published' : 'st-' + r.status}">${t(r.published ? 'st_published' : 'st_' + r.status)}</span>
+        ${typeSelect}
+        ${emailBadge}
+        <span class="url" title="${esc(r.url)}">${esc(short.length > 28 ? short.slice(0, 28) + '…' : short)}</span>
+        ${r.enabled === false
+          ? `<span class="badge st-invalid clickable-badge" data-ract="toggle" data-url="${esc(r.url)}" data-td="${esc(r.targetDomain)}" title="${t('resDisabledHint')}">${t('st_invalid')}</span>`
+          : (r.published
+            ? `<span class="badge st-published clickable-badge" data-ract="unmark-published" data-url="${esc(r.url)}" title="${t('unmarkPublishedLibHint')}">${t('st_published')} <span style="font-size:10px;opacity:0.8;margin-left:2px">✕</span></span>`
+            : `<span class="badge st-${r.status}">${t('st_' + r.status)}</span>`)}
         ${verifyBadge}
         <span class="ops">
           <input type="checkbox" class="res-enable" data-ract="toggle" data-url="${esc(r.url)}" data-td="${esc(r.targetDomain)}" ${r.enabled !== false ? 'checked' : ''} title="${t('resEnable')}">
@@ -355,6 +390,28 @@ function activateTab(name) {
   document.querySelectorAll('.tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
   document.querySelectorAll('.view').forEach((v) => v.classList.toggle('active', v.id === 'view-' + name));
   if (name === 'library') loadLibrary();
+}
+
+/** 判断指定页面是否针对当前任务目标地址已在 published 表或资源库中标记为已发布 */
+function isPagePublished(url) {
+  if (!url || !snap) return false;
+  const target = (snap.assistantTask && snap.assistantTask.targetUrl) || (snap.settings && snap.settings.identity && snap.settings.identity.website) || '';
+  if (!target) return false;
+  const pubs = snap.publishedUrls || [];
+  if (pubs.some((pUrl) => pUrl === url || samePageUrl(pUrl, url))) return true;
+  const resList = snap.resources || [];
+  const hit = resList.find((r) => r && (r.url === url || samePageUrl(r.url, url)));
+  if (hit && hit.published) return true;
+  return false;
+}
+
+/** 判断指定页面是否在资源库中被标记为无效（停用） */
+function isPageDisabled(url) {
+  if (!url || !snap) return false;
+  const resList = snap.resources || [];
+  const hit = resList.find((r) => r && (r.url === url || samePageUrl(r.url, url)));
+  if (hit && hit.enabled === false) return true;
+  return false;
 }
 
 /** 刷新当前激活标签页（助手页的操作对象），随后重渲染助手区 */
@@ -416,9 +473,18 @@ function renderAssistant() {
   }
 
   // 状态行：优先绑定会话的 uiStatus（key 走 i18n，text 直显），无则给默认引导
+  const isPub = isPagePublished(activeTabUrl);
+  const pubBadge = $('#asst-pub-badge');
+  if (pubBadge) pubBadge.style.display = isPub ? 'inline-block' : 'none';
+
   let status = '';
   if (bound && pub.uiStatus) status = pub.uiStatus.key ? t(pub.uiStatus.key) : (pub.uiStatus.text || '');
-  if (!status) status = !activeTabUrl ? t('asstNoPage') : stage === 'awaiting_review' ? t('asstReady') : t('asstManual');
+  if (!status) {
+    if (!activeTabUrl) status = t('asstNoPage');
+    else if (stage === 'awaiting_review') status = t('asstReady');
+    else if (isPub) status = t('asstAlreadyPublished');
+    else status = t('asstManual');
+  }
   $('#asst-status').textContent = status;
   $('#asst-dot').classList.toggle('idle', stage !== 'awaiting_review');
 
@@ -493,10 +559,36 @@ function renderAssistant() {
   const review = stage === 'awaiting_review';
   $('#asst-submit').disabled = !review;
   $('#asst-skip').disabled = !review;
-  // 「标记为无效资源」：激活标签页是可注入网页即可用（按当前页面 URL 停用 analysis 记录，不要求绑定会话）
-  $('#asst-disable').disabled = !activeTabUrl;
-  // 「标注为已发过」：同口径（按当前页面 URL 往 published 表补记录，不要求绑定会话）
-  $('#asst-mark-published').disabled = !activeTabUrl;
+  // 「标记为无效资源」/「恢复为有效资源」：激活标签页是可注入网页即可用
+  const disableBtn = $('#asst-disable');
+  if (disableBtn) {
+    const disabled = isPageDisabled(activeTabUrl);
+    if (disabled) {
+      disableBtn.textContent = t('asstRestoreValid');
+      disableBtn.title = t('asstRestoreValidHint');
+      disableBtn.dataset.action = 'restore';
+    } else {
+      disableBtn.textContent = t('asstMarkInvalid');
+      disableBtn.title = t('asstMarkInvalidHint');
+      disableBtn.dataset.action = 'disable';
+    }
+    disableBtn.disabled = !activeTabUrl;
+  }
+  // 「标注为已发过」/「取消标注」：若已发布则显示「取消标注为已发过」，未发布则显示「标注为已发过」
+  const markPubBtn = $('#asst-mark-published');
+  if (markPubBtn) {
+    if (isPub) {
+      markPubBtn.textContent = t('asstUnmarkPublished');
+      markPubBtn.title = t('asstUnmarkPublishedHint');
+      markPubBtn.disabled = !activeTabUrl;
+      markPubBtn.dataset.action = 'unmark';
+    } else {
+      markPubBtn.textContent = t('asstMarkPublished');
+      markPubBtn.title = t('asstMarkPublishedHint');
+      markPubBtn.disabled = !activeTabUrl;
+      markPubBtn.dataset.action = 'mark';
+    }
+  }
   // 「将当前资源添加到资源库」：同样只要求激活标签页是可注入网页（同行域名取「定位同行网站」输入框）
   $('#asst-add-resource').disabled = !activeTabUrl;
   // 「备注」输入行：标记上一次 Submit 成功的发布（lastPublish），与当前标签页是否绑定无关；
@@ -611,30 +703,72 @@ async function decide(decision) {
   }
 }
 
-/** 「标记为无效资源」：analysis 表该 url 记录 enabled=false（数据保留，结果走状态行/日志） */
+/** 「标记为无效资源」/「恢复为有效资源」：根据当前页面的启用状态切换操作 */
 async function markInvalid() {
   const btn = $('#asst-disable');
   btn.disabled = true;
+  const isRestore = btn.dataset.action === 'restore' || isPageDisabled(activeTabUrl);
   try {
-    const res = await send({ type: 'pub:markInvalid' });
-    if (res && res.ok === false) toast(res.error || t('asstStepNoResp'), 'error');
+    if (isRestore) {
+      const res = await send({ type: 'pub:markValid', url: activeTabUrl });
+      if (res && res.ok === false) {
+        toast(res.error || t('asstStepNoResp'), 'error');
+        btn.disabled = false;
+      } else {
+        toast(t('asstValidRestored'), 'success');
+        await loadLibrary();
+        const sRes = await send({ type: 'getSnapshot' });
+        if (sRes && sRes.snapshot) applySnapshot(sRes.snapshot);
+      }
+    } else {
+      const res = await send({ type: 'pub:markInvalid', domain: $('#asst-locate-domain').value.trim(), url: activeTabUrl });
+      if (res && res.ok === false) {
+        toast(res.error || t('asstStepNoResp'), 'error');
+        btn.disabled = false;
+      } else {
+        toast(t('asstInvalidMarked'), 'success');
+        await loadLibrary();
+        const sRes = await send({ type: 'getSnapshot' });
+        if (sRes && sRes.snapshot) applySnapshot(sRes.snapshot);
+      }
+    }
   } catch (e) {
     toast(e.message, 'error');
+    btn.disabled = false;
   }
-  btn.disabled = false;
 }
 
-/** 「标注为已发过」：往 published 表补一条记录（同行域名随消息带给后台，取「定位同行网站」输入框） */
+/** 「标注为已发过」/「取消标注」：根据当前页面的发布状态切换操作 */
 async function markAsPublished() {
   const btn = $('#asst-mark-published');
   btn.disabled = true;
+  const isUnmark = btn.dataset.action === 'unmark' || isPagePublished(activeTabUrl);
   try {
-    const res = await send({ type: 'pub:markPublished', domain: $('#asst-locate-domain').value.trim() });
-    if (res && res.ok === false) toast(res.error || t('asstStepNoResp'), 'error');
+    if (isUnmark) {
+      const res = await send({ type: 'pub:unmarkPublished', url: activeTabUrl });
+      if (res && res.ok === false) {
+        toast(res.error || t('asstStepNoResp'), 'error');
+        btn.disabled = false;
+      } else {
+        toast(t('asstPublishedUnmarked'), 'success');
+        const sRes = await send({ type: 'getSnapshot' });
+        if (sRes && sRes.snapshot) applySnapshot(sRes.snapshot);
+      }
+    } else {
+      const res = await send({ type: 'pub:markPublished', domain: $('#asst-locate-domain').value.trim() });
+      if (res && res.ok === false) {
+        toast(res.error || t('asstStepNoResp'), 'error');
+        btn.disabled = false;
+      } else {
+        toast(t('asstPublishedMarked'), 'success');
+        const sRes = await send({ type: 'getSnapshot' });
+        if (sRes && sRes.snapshot) applySnapshot(sRes.snapshot);
+      }
+    }
   } catch (e) {
     toast(e.message, 'error');
+    btn.disabled = false;
   }
-  btn.disabled = false;
 }
 
 /** 「将当前资源添加到资源库」：同行网站取「定位同行网站」右侧输入框的值，后台补录 analysis 表（ready） */
@@ -1007,6 +1141,21 @@ function bindEvents() {
       renderLibrary();
       return;
     }
+    // 资源库：取消已发布标注
+    const unmarkBtn = e.target.closest('[data-ract="unmark-published"]');
+    if (unmarkBtn) {
+      const url = unmarkBtn.dataset.url;
+      const res = await send({ type: 'pub:unmarkPublished', url });
+      if (res && res.ok === false) {
+        toast(res.error || t('asstStepNoResp'), 'error');
+      } else {
+        toast(t('asstPublishedUnmarked'), 'success');
+        await loadLibrary();
+        const sRes = await send({ type: 'getSnapshot' });
+        if (sRes && sRes.snapshot) applySnapshot(sRes.snapshot);
+      }
+      return;
+    }
     const btn = e.target.closest('button[data-ract]');
     if (!btn) return;
     const url = btn.dataset.url;
@@ -1037,15 +1186,32 @@ function bindEvents() {
     }
   });
 
-  // 资源启用/停用（行内 checkbox）
+  // 资源行内变更（启用/停用 checkbox、手动修改分类 select）
   $('#res-list').addEventListener('change', async (e) => {
-    const box = e.target.closest('input[data-ract="toggle"]');
-    if (!box) return;
-    const res = (libraryRows || []).find((r) => r.url === box.dataset.url && r.targetDomain === box.dataset.td);
+    const typeSel = e.target.closest('select[data-ract="change-type"]');
+    if (typeSel) {
+      const url = typeSel.dataset.url;
+      const targetDomain = typeSel.dataset.td;
+      const newType = typeSel.value;
+      const res = (libraryRows || []).find((r) => r.url === url && r.targetDomain === targetDomain);
+      if (res) res.type = newType;
+      await act({ type: 'updateLibraryResourceType', targetDomain, url, resourceType: newType });
+      toast(t('typeChanged', { type: t('type_' + newType) }), 'success');
+      renderLibrary();
+      return;
+    }
+
+    const toggleEl = e.target.closest('[data-ract="toggle"]');
+    if (!toggleEl) return;
+    const url = toggleEl.dataset.url;
+    const td = toggleEl.dataset.td;
+    const res = (libraryRows || []).find((r) => (r.url === url || samePageUrl(r.url, url)) && (!td || r.targetDomain === td));
     if (!res) return;
-    res.enabled = box.checked;
+    const newEnabled = toggleEl.tagName === 'INPUT' ? toggleEl.checked : !res.enabled;
+    res.enabled = newEnabled;
     renderLibrary();
-    await act({ type: 'setLibraryEnabled', keys: [[res.targetDomain, res.url]], enabled: box.checked });
+    await act({ type: 'setLibraryEnabled', keys: [[res.targetDomain, res.url]], enabled: newEnabled });
+    await loadLibrary();
   });
 
   // 总开关：启用全部 / 停用全部
