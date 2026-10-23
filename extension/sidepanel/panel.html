@@ -18,9 +18,15 @@
     <!-- ===== 收集 ===== -->
     <section id="view-collect" class="view active">
       <div class="form-row">
-        <label class="field-label" data-i18n="targetDomain">目标域名</label>
+        <label class="field-label" data-i18n="targetProjectDomain">目标域名（服务对象）</label>
         <div class="input-row">
-          <input type="text" id="collect-domain" value="sprunki-game.io" placeholder="sprunki-game.io" spellcheck="false" />
+          <input type="text" id="collect-target-domain" placeholder="输入你要做外链的网站，如 ytconversion.com" data-i18n-ph="targetProjectDomainPh" spellcheck="false" />
+        </div>
+      </div>
+      <div class="form-row" style="margin-top:8px">
+        <label class="field-label" data-i18n="competitorDomain">竞对域名</label>
+        <div class="input-row">
+          <input type="text" id="collect-domain" value="sprunki-game.io" placeholder="sprunki-game.io" data-i18n-ph="competitorDomainPh" spellcheck="false" />
           <button id="btn-collect" class="btn btn-primary" data-i18n="startCollect">开始收集</button>
         </div>
         <div class="input-row" style="margin-top:8px">
@@ -180,6 +186,9 @@
     <!-- ===== 资源库 ===== -->
     <section id="view-library" class="view">
       <div class="lib-toolbar" style="display:flex;gap:8px;margin-bottom:8px">
+        <select id="lib-target-filter" class="form-select" style="flex:1.2;font-size:12px;padding:4px 6px">
+          <option value="all" data-i18n="allTargetDomains">全部目标域名</option>
+        </select>
         <button id="btn-spam-clean" class="btn btn-outline btn-sm" style="flex:1" data-i18n="spamClean" data-i18n-title="spamCleanTitle">外链 Spam 清洗</button>
         <button id="btn-blacklist-manage" class="btn btn-ghost btn-sm" data-i18n="blacklistModalTitle">黑名单</button>
       </div>

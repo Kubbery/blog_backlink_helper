@@ -97,6 +97,7 @@ async function snapshot() {
       status: st.collectState.status,
       mode: st.collectState.mode || 'collect',
       targetDomain: st.collectState.targetDomain,
+      myTargetDomain: st.collectState.myTargetDomain || '',
       provider: st.collectState.provider,
       phase: st.collectState.phase,
       discovered: st.collectState.discovered,
@@ -415,9 +416,16 @@ async function handleMessage(msg, sender) {
       return { ok: true, snapshot: await snapshot() };
 
     case 'startCollect':
-      await collect.start(msg.domain, msg.provider);
+      await collect.start(msg.domain, msg.provider, msg.myTargetDomain);
       ensureAlarm(true);
       return { ok: true, snapshot: await snapshot() };
+
+    case 'setCollectTargetDomain': {
+      getState().collectState.myTargetDomain = (msg.myTargetDomain || '').trim();
+      await save('collectState');
+      broadcast();
+      return { ok: true };
+    }
 
     case 'stopCollect':
       await collect.stop();
@@ -619,6 +627,7 @@ async function handleMessage(msg, sender) {
             url: r.url,
             domain: host,
             targetDomain: r.targetDomain,
+            myTargetDomain: r.myTargetDomain || '',
             type: 'blog_comment',
             status: r.status,
             enabled: !isBlacklisted && r.enabled !== false, // 黑名单强制停用

@@ -11,7 +11,8 @@ const STORAGE_KEY = 'bcm_store';
 const EMPTY_COLLECT = () => ({
   status: 'idle',        // idle | running | stopping
   mode: 'collect',       // collect=抓外链数据 / analyze=逐条分析
-  targetDomain: '',
+  targetDomain: '',      // 竞对域名
+  myTargetDomain: '',    // 目标域名（服务对象）
   provider: 'semrush',
   phase: '',             // 当前阶段文案，如「正在分析外链页面...」
   discovered: 0,

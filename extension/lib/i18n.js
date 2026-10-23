@@ -22,8 +22,14 @@ export const MESSAGES = {
   devReloadShort: { zh: '重载插件', en: 'Reload' },
 
   // ---- 收集 ----
-  targetDomain: { zh: '目标域名', en: 'Target Domain' },
+  targetProjectDomain: { zh: '目标域名（服务对象）', en: 'Target Domain (My Site)' },
+  targetProjectDomainPh: { zh: '输入你要做外链的网站，如 ytconversion.com', en: 'Target domain to build links for, e.g. ytconversion.com' },
+  targetDomain: { zh: '竞对域名', en: 'Competitor Domain' },
   targetDomainPh: { zh: '输入同行站点域名，如 sprunki-game.io', en: "Competitor domain, e.g. sprunki-game.io" },
+  competitorDomain: { zh: '竞对域名', en: 'Competitor Domain' },
+  competitorDomainPh: { zh: '输入同行站点域名，如 sprunki-game.io', en: "Competitor domain, e.g. sprunki-game.io" },
+  allTargetDomains: { zh: '全部目标域名', en: 'All Target Domains' },
+  unassignedTarget: { zh: '未指定目标', en: 'Unassigned Target' },
   dataSource: { zh: '数据来源', en: 'Data Source' },
   pageDelay: { zh: '翻页间隔(秒)', en: 'Page Delay (s)' },
   pageAsFilter: { zh: '页面 AS ≥', en: 'Page AS ≥' },

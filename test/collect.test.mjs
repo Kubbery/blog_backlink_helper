@@ -22,11 +22,11 @@ globalThis.chrome = {
   runtime: { sendMessage: () => Promise.reject(new Error('no receiver')) },
 };
 
-let CollectController, idbPutAll;
+let CollectController, idbPutAll, idbGet;
 
 before(async () => {
   ({ CollectController } = await import('../extension/background/collect.js'));
-  ({ idbPutAll } = await import('../extension/lib/idb.js'));
+  ({ idbPutAll, idbGet } = await import('../extension/lib/idb.js'));
   const bl = (url) => ({ targetDomain: 'example.com', url, domain: 'b.com' });
   await idbPutAll('backlinks', [
     bl('https://a.com/1'), bl('https://a.com/2'), bl('https://a.com/3'),
@@ -58,4 +58,28 @@ test('statsBaseline：无数据域名四项全为 0', async () => {
     [base.discovered, base.analyzed, base.queued, base.matched],
     [0, 0, 0, 0],
   );
+});
+
+test('onScrapedRows 与 recordAnalysis：外链与分析记录带上服务的目标域名', async () => {
+  const c = new CollectController(async () => {});
+  c.cs.targetDomain = 'peer-site.com';
+  c.cs.myTargetDomain = 'my-target.com';
+  c.cs.seen = [];
+  c.cs.queue = [];
+
+  const rawRows = [
+    { url: 'https://blog.com/article-1', platform: '博客', ascore: '30' },
+  ];
+  const kept = c.onScrapedRows(rawRows, 1);
+  assert.equal(kept, 1);
+
+  const backlink = await idbGet('backlinks', ['peer-site.com', 'https://blog.com/article-1']);
+  assert.ok(backlink);
+  assert.equal(backlink.myTargetDomain, 'my-target.com');
+
+  await c.recordAnalysis('peer-site.com', 'https://blog.com/article-1', 'ready', '有评论表单');
+  const analysis = await idbGet('analysis', ['peer-site.com', 'https://blog.com/article-1']);
+  assert.ok(analysis);
+  assert.equal(analysis.myTargetDomain, 'my-target.com');
+  assert.equal(analysis.status, 'ready');
 });

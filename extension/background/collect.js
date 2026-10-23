@@ -55,15 +55,17 @@ export class CollectController {
     return getState().collectState;
   }
 
-  async start(domain, provider) {
+  async start(domain, provider, myTargetDomain) {
     const cs = this.cs;
     if (cs.status === 'running') throw new Error('收集/分析进行中');
     domain = (domain || '').trim().replace(/^https?:\/\//, '').replace(/\/.*$/, '');
-    if (!domain) throw new Error('请输入目标域名');
+    if (!domain) throw new Error('请输入竞对域名');
+    myTargetDomain = (myTargetDomain || '').trim().replace(/^https?:\/\//, '').replace(/\/.*$/, '');
     Object.assign(cs, {
       status: 'running',
       mode: 'collect', // collect=只抓外链数据 / analyze=逐条访问+AI 分析
       targetDomain: domain,
+      myTargetDomain: myTargetDomain || cs.myTargetDomain || '',
       provider: provider in PROVIDERS ? provider : 'semrush',
       phase: 'phaseOpening',
       discovered: 0, analyzed: 0, matched: 0, queued: 0,
@@ -334,6 +336,7 @@ export class CollectController {
       cs.seen.push(norm);
       const row = {
         targetDomain: cs.targetDomain,
+        myTargetDomain: cs.myTargetDomain || '',
         url: norm,
         domain: host.replace(/^www\./, ''),
         title: r.title || '',
@@ -603,7 +606,20 @@ export class CollectController {
   async recordAnalysis(domain, url, status, reason) {
     try {
       const old = await idbGet('analysis', [domain, url]).catch(() => null);
-      await idbPut('analysis', { ...(old || {}), targetDomain: domain, url, status, reason, checkedAt: Date.now() });
+      let myTargetDomain = old?.myTargetDomain || '';
+      if (!myTargetDomain) {
+        const bl = await idbGet('backlinks', [domain, url]).catch(() => null);
+        myTargetDomain = bl?.myTargetDomain || this.cs.myTargetDomain || '';
+      }
+      await idbPut('analysis', {
+        ...(old || {}),
+        targetDomain: domain,
+        myTargetDomain,
+        url,
+        status,
+        reason,
+        checkedAt: Date.now(),
+      });
     } catch (e) {
       addLog('collect', `IndexedDB 分析记录写入失败：${e.message}`, 'warn', url);
     }

@@ -934,6 +934,157 @@ textarea {
   font-weight: 600;
 }
 
+/* 两级分组：目标域名大组 */
+.res-target-group {
+  background: var(--card);
+  border: 1.5px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: var(--shadow-sm);
+  transition: all 0.2s ease;
+}
+
+.res-target-group:hover {
+  border-color: var(--border-strong);
+}
+
+.res-target-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  background: linear-gradient(135deg, rgba(14, 165, 233, 0.08) 0%, rgba(139, 92, 246, 0.05) 100%);
+  border-bottom: 1.5px solid var(--border);
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s ease;
+}
+
+.res-target-head:hover {
+  background: linear-gradient(135deg, rgba(14, 165, 233, 0.14) 0%, rgba(139, 92, 246, 0.09) 100%);
+}
+
+.res-target-group.folded .res-target-head {
+  border-bottom: none;
+}
+
+.res-target-head .g-fold {
+  background: none;
+  border: none;
+  padding: 0 4px;
+  cursor: pointer;
+  color: var(--primary);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
+  transition: transform 0.15s ease;
+}
+
+.res-target-head .g-fold:hover {
+  transform: scale(1.15);
+}
+
+.res-target-head .g-target-title {
+  font-weight: 700;
+  font-size: 13px;
+  color: var(--text);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.res-target-head .g-count {
+  font-size: 11px;
+  color: var(--primary);
+  background: var(--primary-light);
+  border-radius: 10px;
+  padding: 2px 8px;
+  font-weight: 700;
+}
+
+.res-target-body {
+  padding: 8px 10px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* 两级分组：竞对域名小组 */
+.res-subgroup {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.res-subgroup-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--bg);
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s ease;
+}
+
+.res-subgroup-head:hover {
+  background: var(--card-hover);
+}
+
+.res-subgroup-head .g-fold {
+  background: none;
+  border: none;
+  padding: 0 2px;
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1;
+  transition: transform 0.15s ease;
+}
+
+.res-subgroup-head .g-fold:hover {
+  color: var(--text);
+  transform: scale(1.15);
+}
+
+.res-subgroup-head .g-peer {
+  font-weight: 600;
+  color: var(--text);
+  font-size: 12px;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.res-subgroup-head .g-count {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  font-weight: 600;
+}
+
+.res-subgroup-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-left: 10px;
+  border-left: 2px solid var(--border);
+  margin-left: 8px;
+}
+
+.res-subgroup-body .res-item {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  padding: 10px 12px;
+}
+
+.res-subgroup-body .res-item:hover {
+  background: #ffffff;
+  border-color: var(--border-strong);
+}
+
 .res-item {
   background: var(--card);
   border: 1.5px solid var(--border);

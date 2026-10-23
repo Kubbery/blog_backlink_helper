@@ -15,7 +15,7 @@ import { LIMITS } from '../lib/config.js';
 let snap = null;
 
 // 资源库筛选状态
-const filters = { type: 'all', status: null };
+const filters = { type: 'all', status: null, targetDomain: 'all' };
 // 资源库列表：点击「资源库」Tab 时从 IndexedDB analysis 表加载（不经快照内存态）
 let libraryRows = null;
 // 资源库分组折叠状态（面板会话内存，按同行域名记忆）
@@ -79,6 +79,19 @@ function renderCollect() {
   const mode = c.mode || 'collect';
   const collectRunning = busy && mode === 'collect';
   const analyzeRunning = busy && mode === 'analyze';
+
+  const targetDomainEl = $('#collect-target-domain');
+  if (targetDomainEl && document.activeElement !== targetDomainEl) {
+    if (c.myTargetDomain) {
+      targetDomainEl.value = c.myTargetDomain;
+    } else if (!targetDomainEl.value && snap.assistantTask && snap.assistantTask.targetUrl) {
+      try {
+        const u = new URL(snap.assistantTask.targetUrl);
+        targetDomainEl.value = u.hostname.replace(/^www\./, '');
+      } catch {}
+    }
+  }
+  if (targetDomainEl) targetDomainEl.disabled = busy;
 
   $('#collect-domain').value = c.targetDomain || $('#collect-domain').value;
   $('#collect-provider').value = c.provider || 'semrush';
@@ -153,12 +166,39 @@ function renderLogs() {
 
 /* ---- 资源库 ---- */
 // 点击「资源库」Tab 时：读 IndexedDB analysis 表（命中结论 ready/captcha，验证码资源也算命中）
+function updateTargetFilterOptions() {
+  const sel = $('#lib-target-filter');
+  if (!sel) return;
+  const currentVal = filters.targetDomain || 'all';
+  const targets = new Set();
+  let hasUnassigned = false;
+  for (const r of libraryRows || []) {
+    if (r.myTargetDomain) targets.add(r.myTargetDomain);
+    else hasUnassigned = true;
+  }
+  const sorted = [...targets].sort((a, b) => a.localeCompare(b));
+  let html = `<option value="all">${t('allTargetDomains')}</option>`;
+  for (const td of sorted) {
+    html += `<option value="${esc(td)}">🎯 ${esc(td)}</option>`;
+  }
+  if (hasUnassigned && sorted.length > 0) {
+    html += `<option value="__unassigned__">${t('unassignedTarget')}</option>`;
+  }
+  sel.innerHTML = html;
+  sel.value = currentVal;
+  if (sel.value !== currentVal) {
+    filters.targetDomain = 'all';
+    sel.value = 'all';
+  }
+}
+
 async function loadLibrary() {
   try {
     const res = await send({ type: 'getLibraryResources' });
     if (res && res.ok === false) return toast(res.error, 'error');
     if (res && res.resources) {
       libraryRows = res.resources;
+      updateTargetFilterOptions();
       renderLibrary();
     }
   } catch (e) {
@@ -168,6 +208,13 @@ async function loadLibrary() {
 
 function filteredResources() {
   let rs = libraryRows || [];
+  if (filters.targetDomain && filters.targetDomain !== 'all') {
+    if (filters.targetDomain === '__unassigned__') {
+      rs = rs.filter((r) => !r.myTargetDomain);
+    } else {
+      rs = rs.filter((r) => r.myTargetDomain === filters.targetDomain);
+    }
+  }
   if (filters.type !== 'all') rs = rs.filter((r) => r.type === filters.type);
   if (filters.status === 'published') rs = rs.filter((r) => r.published);
   else if (filters.status) rs = rs.filter((r) => r.status === filters.status);
@@ -192,23 +239,52 @@ function renderLibrary() {
   $('#res-empty').style.display = rs.length ? 'none' : '';
   // 最多渲染 200 条，避免面板卡顿
   const view = rs.slice(0, 200);
-  // 按目标域名分组（组间按域名字典序排列）
-  const groups = new Map();
+  // 两级分组：目标域名为大组，其下按竞对域名分为小组
+  const targetGroups = new Map();
   for (const r of view) {
-    const key = r.targetDomain || '';
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(r);
+    const targetKey = r.myTargetDomain || '';
+    const peerKey = r.targetDomain || '';
+    if (!targetGroups.has(targetKey)) {
+      targetGroups.set(targetKey, {
+        targetDomain: targetKey,
+        peers: new Map(),
+        totalCount: 0,
+      });
+    }
+    const tGroup = targetGroups.get(targetKey);
+    tGroup.totalCount++;
+    if (!tGroup.peers.has(peerKey)) {
+      tGroup.peers.set(peerKey, {
+        peerDomain: peerKey,
+        rows: [],
+      });
+    }
+    tGroup.peers.get(peerKey).rows.push(r);
   }
-  const sortedGroups = [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0]));
-  list.innerHTML = sortedGroups.map(([td, rows]) => {
-    const folded = collapsedGroups.has(td);
-    return `
-      <div class="res-group-head">
-        <button class="g-fold" data-gfold="${esc(td)}" title="${t(folded ? 'resExpand' : 'resCollapse')}">${folded ? '▸' : '▾'}</button>
-        <span class="g-domain">${esc(td || '—')}</span>
-        <span class="g-count">${rows.length}</span>
-      </div>
-      ${folded ? '' : rows.map((r) => {
+
+  // 大组排序：有域名的按字母升序，未指定目标的排在最后
+  const sortedTargets = [...targetGroups.entries()].sort((a, b) => {
+    if (!a[0] && b[0]) return 1;
+    if (a[0] && !b[0]) return -1;
+    return a[0].localeCompare(b[0]);
+  });
+
+  list.innerHTML = sortedTargets.map(([tKey, tGroup]) => {
+    const tFoldKey = `t:${tKey}`;
+    const tFolded = collapsedGroups.has(tFoldKey);
+    const targetTitle = tKey
+      ? `🎯 ${esc(tKey)}`
+      : `🎯 ${t('unassignedTarget')}`;
+
+    // 小组排序：按竞对域名升序
+    const sortedPeers = [...tGroup.peers.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+
+    const peerGroupsHtml = sortedPeers.map(([pKey, pGroup]) => {
+      const pFoldKey = `p:${tKey}__${pKey}`;
+      const pFolded = collapsedGroups.has(pFoldKey);
+      const rows = pGroup.rows || [];
+
+      const rowsHtml = rows.map((r) => {
         const fav = `<img class="fav" src="${chrome.runtime.getURL('/_favicon/?pageUrl=' + encodeURIComponent(r.url) + '&clientId=bcm')}" onerror="this.style.display='none'">`;
         const short = r.domain + (r.url.replace(/^https?:\/\/[^/]+/, '').length > 1 ? r.url.replace(/^https?:\/\/[^/]+/, '') : '');
         let verifyBadge = '';
@@ -240,7 +316,28 @@ function renderLibrary() {
           <button class="icon-btn danger" data-ract="delete" data-url="${esc(r.url)}" data-td="${esc(r.targetDomain)}" title="${t('resDelete')}">🗑</button>
         </span>
       </div>`;
-      }).join('')}`;
+      }).join('');
+
+      return `
+        <div class="res-subgroup">
+          <div class="res-subgroup-head" data-gfold="${esc(pFoldKey)}">
+            <button class="g-fold" data-gfold="${esc(pFoldKey)}" title="${t(pFolded ? 'resExpand' : 'resCollapse')}">${pFolded ? '▸' : '▾'}</button>
+            <span class="g-peer" title="${t('competitorDomain')}">🤼 ${esc(pGroup.peerDomain || '—')}</span>
+            <span class="g-count">${rows.length}</span>
+          </div>
+          ${pFolded ? '' : `<div class="res-subgroup-body">${rowsHtml}</div>`}
+        </div>`;
+    }).join('');
+
+    return `
+      <div class="res-target-group${tFolded ? ' folded' : ''}">
+        <div class="res-target-head" data-gfold="${esc(tFoldKey)}">
+          <button class="g-fold" data-gfold="${esc(tFoldKey)}" title="${t(tFolded ? 'resExpand' : 'resCollapse')}">${tFolded ? '▸' : '▾'}</button>
+          <span class="g-target-title" title="${t('targetProjectDomain')}">${targetTitle}</span>
+          <span class="g-count">${tGroup.totalCount}</span>
+        </div>
+        ${tFolded ? '' : `<div class="res-target-body">${peerGroupsHtml}</div>`}
+      </div>`;
   }).join('');
 }
 
@@ -720,10 +817,28 @@ function bindEvents() {
       await act({ type: 'stopCollect' });
     } else {
       const domain = $('#collect-domain').value.trim();
-      if (!domain) return toast(t('targetDomain') + '?', 'error');
-      await act({ type: 'startCollect', domain, provider: $('#collect-provider').value });
+      const myTargetDomain = ($('#collect-target-domain')?.value || '').trim();
+      if (!domain) return toast(t('competitorDomain') + '?', 'error');
+      await act({ type: 'startCollect', domain, provider: $('#collect-provider').value, myTargetDomain });
     }
   });
+
+  // 目标域名输入记忆
+  const targetDomainInput = $('#collect-target-domain');
+  if (targetDomainInput) {
+    targetDomainInput.addEventListener('change', () => {
+      send({ type: 'setCollectTargetDomain', myTargetDomain: targetDomainInput.value.trim() }).catch(() => {});
+    });
+  }
+
+  // 资源库：按目标域名筛选
+  const targetFilterSel = $('#lib-target-filter');
+  if (targetFilterSel) {
+    targetFilterSel.addEventListener('change', () => {
+      filters.targetDomain = targetFilterSel.value;
+      renderLibrary();
+    });
+  }
 
   // 从种子继续（取下一个未使用的种子域名回填并标记已使用）
   $('#btn-continue-seed').addEventListener('click', async () => {
@@ -884,7 +999,7 @@ function bindEvents() {
   // 资源行内操作
   $('#res-list').addEventListener('click', async (e) => {
     // 分组折叠/展开
-    const fold = e.target.closest('button[data-gfold]');
+    const fold = e.target.closest('[data-gfold]');
     if (fold) {
       const td = fold.dataset.gfold;
       if (collapsedGroups.has(td)) collapsedGroups.delete(td);
